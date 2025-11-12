@@ -1,0 +1,21 @@
+# =============================
+# Stage 4 Final Setup
+# =============================
+
+# Exclude large datasets & media
+images/
+mpii_human_pose_v1_u12_2/
+*.mp4
+*.jpg
+*.zip
+
+#Exclude Python cache & env
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+#Exclude IDE/project files
+.idea/
+.vscode/
