@@ -58,11 +58,11 @@ class MPIIPoseDataset(Dataset):
         self.rotation_range = rotation_range
         self.scale_range = scale_range
         
+        # Get list of available images first (needed for dummy annotations)
+        self.image_files = [f for f in os.listdir(images_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))] if os.path.exists(images_dir) else []
+        
         # Load annotations
         self.annotations = self._load_annotations(annotations_file)
-        
-        # Get list of available images
-        self.image_files = [f for f in os.listdir(images_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
         
         # Filter annotations to only include images we have
         self.valid_annotations = []
@@ -154,7 +154,17 @@ class MPIIPoseDataset(Dataset):
     def _create_dummy_annotations(self) -> List[Dict]:
         """Create dummy annotations for images without MPII data"""
         annotations = []
-        for img_file in self.image_files[:1000]:  # Limit to first 1000 for demo
+        # Use image_files if available, otherwise read from directory
+        if hasattr(self, 'image_files') and len(self.image_files) > 0:
+            image_list = self.image_files
+        else:
+            # Fallback: read images directory directly
+            if os.path.exists(self.images_dir):
+                image_list = [f for f in os.listdir(self.images_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+            else:
+                image_list = []
+        
+        for img_file in image_list[:1000]:  # Limit to first 1000 for demo
             annotations.append({
                 'image_name': img_file,
                 'keypoints': np.zeros((16, 3)),
