@@ -1,3 +1,16 @@
+"""
+Evaluation Module for Human Pose Estimation Models
+
+This module provides comprehensive evaluation metrics:
+- PCK (Percentage of Correct Keypoints) at multiple thresholds
+- PCKh (PCK normalized by head size)
+- Average Precision (AP) metrics
+- Joint-wise accuracy analysis
+- Prediction visualization and comparison
+
+These metrics are standard for evaluating pose estimation model performance.
+"""
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -13,7 +26,13 @@ from dataset import MPIIPoseDataset
 
 
 class PoseEvaluator:
-    """Comprehensive evaluation metrics for pose estimation"""
+    """
+    Comprehensive evaluation metrics for pose estimation models.
+    
+    Implements standard pose estimation evaluation metrics including PCK,
+    PCKh, AP, and joint-wise accuracy. Provides visualization tools for
+    comparing predictions with ground truth.
+    """
     
     def __init__(self, num_joints: int = 16):
         self.num_joints = num_joints

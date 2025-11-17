@@ -1,3 +1,16 @@
+"""
+MediaPipe Integration Module for Human Pose Estimation
+
+This module provides integration with Google's MediaPipe pose estimation:
+- MediaPipe pose detection wrapper
+- Conversion between MediaPipe and MPII joint formats
+- Hybrid approach combining MediaPipe and custom trained models
+- Model comparison and benchmarking utilities
+
+MediaPipe provides fast, real-time pose estimation without requiring
+model training, while custom models offer domain-specific accuracy.
+"""
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -13,7 +26,13 @@ from dataset import MPIIPoseDataset
 
 
 class MediaPipePoseEstimator:
-    """MediaPipe pose estimation wrapper"""
+    """
+    MediaPipe pose estimation wrapper.
+    
+    Provides a Python interface to Google's MediaPipe pose estimation solution.
+    Includes utilities to convert MediaPipe landmarks to MPII format for
+    compatibility with custom models and evaluation metrics.
+    """
     
     def __init__(self, 
                  static_image_mode: bool = False,

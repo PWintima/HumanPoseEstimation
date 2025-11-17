@@ -1,3 +1,17 @@
+"""
+Dataset Loading and Preprocessing Module for Human Pose Estimation
+
+This module provides:
+- MPII dataset loader with annotation parsing
+- Data augmentation (rotation, flipping, scaling)
+- Heatmap generation from keypoint coordinates
+- Train/validation split functionality
+- Support for dummy annotations when MPII annotations are unavailable
+
+The dataset outputs images, heatmaps, and keypoint coordinates suitable
+for training pose estimation models.
+"""
+
 import os
 import cv2
 import numpy as np
@@ -12,7 +26,12 @@ import random
 
 class MPIIPoseDataset(Dataset):
     """
-    MPII Human Pose Dataset loader
+    MPII Human Pose Dataset loader for PyTorch.
+    
+    Loads images and annotations from the MPII Human Pose dataset format.
+    Supports data augmentation and heatmap generation for training pose
+    estimation models. Can also work with dummy annotations if MPII
+    annotations are not available.
     """
     
     # MPII joint indices

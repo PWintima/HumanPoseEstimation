@@ -1,3 +1,17 @@
+"""
+Inference Module for Human Pose Estimation
+
+This module provides inference capabilities for trained pose estimation models:
+- Single image pose estimation
+- Batch processing
+- Video processing (frame-by-frame)
+- Real-time webcam processing
+- Pose visualization with skeleton drawing
+
+Supports both HRNet and SimpleBaseline models. Can process images, videos,
+or live webcam feeds.
+"""
+
 import torch
 import torch.nn as nn
 import cv2
@@ -16,7 +30,13 @@ from dataset import MPIIPoseDataset
 
 
 class PoseInference:
-    """Inference class for pose estimation"""
+    """
+    Inference class for pose estimation models.
+    
+    Provides methods to run inference on images, videos, or webcam feeds
+    using trained pose estimation models. Includes preprocessing, postprocessing,
+    and visualization utilities.
+    """
     
     def __init__(self, 
                  model_path: str,

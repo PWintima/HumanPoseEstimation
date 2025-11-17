@@ -1,3 +1,18 @@
+"""
+Training Pipeline for Human Pose Estimation Models
+
+This module provides a comprehensive training system with:
+- Model training with configurable optimizers and schedulers
+- Validation and evaluation metrics (PCK accuracy)
+- Checkpointing and model saving
+- Training curve visualization
+- Early stopping support
+- Gradient clipping
+- Comprehensive logging
+
+The trainer supports both HRNet and SimpleBaseline architectures.
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -17,7 +32,18 @@ from model import create_model
 
 
 class PoseTrainer:
-    """Comprehensive trainer for pose estimation models"""
+    """
+    Comprehensive trainer for pose estimation models.
+    
+    Handles the complete training lifecycle including:
+    - Training loop with progress tracking
+    - Validation and metric computation
+    - Model checkpointing (best and latest)
+    - Learning rate scheduling
+    - Early stopping
+    - Training curve visualization
+    - Comprehensive logging
+    """
     
     def __init__(self, 
                  model: nn.Module,
@@ -102,114 +128,161 @@ class PoseTrainer:
         self.logger = logging.getLogger(__name__)
     
     def train_epoch(self) -> float:
-        """Train for one epoch"""
+        """
+        Train the model for one complete epoch.
+        
+        Processes all batches in the training set, computes loss, performs
+        backpropagation, and updates model parameters. Includes gradient
+        clipping and progress tracking.
+        
+        Returns:
+            Average training loss for the epoch
+        """
+        # Set model to training mode (enables dropout, batch norm updates, etc.)
         self.model.train()
         total_loss = 0.0
         num_batches = len(self.train_loader)
         
+        # Create progress bar for visual feedback
         progress_bar = tqdm(self.train_loader, desc=f'Epoch {self.current_epoch}')
         
         for batch_idx, batch in enumerate(progress_bar):
+            # Move data to device (GPU or CPU)
             images = batch['image'].to(self.device)
-            heatmaps = batch['heatmaps'].to(self.device)
+            heatmaps = batch['heatmaps'].to(self.device)  # Ground truth heatmaps
             
-            # Forward pass
-            self.optimizer.zero_grad()
+            # Forward pass: predict heatmaps from images
+            self.optimizer.zero_grad()  # Clear gradients from previous iteration
             predicted_heatmaps = self.model(images)
             
-            # Compute loss
+            # Compute loss: MSE between predicted and ground truth heatmaps
             loss = self.criterion(predicted_heatmaps, heatmaps)
             
-            # Backward pass
+            # Backward pass: compute gradients
             loss.backward()
             
-            # Gradient clipping
+            # Gradient clipping: prevent exploding gradients
             if self.config.get('grad_clip', 0) > 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
             
+            # Update model parameters
             self.optimizer.step()
             
+            # Accumulate loss for epoch average
             total_loss += loss.item()
             
-            # Update progress bar
+            # Update progress bar with current and average loss
             progress_bar.set_postfix({
                 'Loss': f'{loss.item():.6f}',
                 'Avg Loss': f'{total_loss / (batch_idx + 1):.6f}'
             })
             
-            # Log batch loss
+            # Log batch loss at specified intervals
             if batch_idx % self.config.get('log_interval', 100) == 0:
                 self.logger.info(f'Epoch {self.current_epoch}, Batch {batch_idx}/{num_batches}, Loss: {loss.item():.6f}')
         
+        # Compute and store average loss for this epoch
         avg_loss = total_loss / num_batches
         self.train_losses.append(avg_loss)
         
         return avg_loss
     
     def validate(self) -> Tuple[float, float]:
-        """Validate the model"""
+        """
+        Validate the model on the validation set.
+        
+        Evaluates model performance without gradient computation (faster).
+        Computes both loss and PCK (Percentage of Correct Keypoints) accuracy.
+        
+        Returns:
+            Tuple of (average validation loss, average PCK@0.5 accuracy)
+        """
+        # Set model to evaluation mode (disables dropout, uses batch norm stats)
         self.model.eval()
         total_loss = 0.0
         total_accuracy = 0.0
         num_batches = len(self.val_loader)
         
+        # Disable gradient computation for validation (saves memory and computation)
         with torch.no_grad():
             progress_bar = tqdm(self.val_loader, desc='Validation')
             
             for batch_idx, batch in enumerate(progress_bar):
+                # Move data to device
                 images = batch['image'].to(self.device)
-                heatmaps = batch['heatmaps'].to(self.device)
-                keypoints = batch['keypoints'].to(self.device)
+                heatmaps = batch['heatmaps'].to(self.device)  # Ground truth heatmaps
+                keypoints = batch['keypoints'].to(self.device)  # Ground truth keypoint coordinates
                 
-                # Forward pass
+                # Forward pass: predict heatmaps
                 predicted_heatmaps = self.model(images)
                 
-                # Compute loss
+                # Compute loss: MSE between predicted and ground truth heatmaps
                 loss = self.criterion(predicted_heatmaps, heatmaps)
                 total_loss += loss.item()
                 
-                # Compute accuracy (PCK@0.5)
+                # Compute PCK accuracy: percentage of keypoints within threshold distance
                 accuracy = self._compute_pck_accuracy(predicted_heatmaps, keypoints)
                 total_accuracy += accuracy
                 
+                # Update progress bar
                 progress_bar.set_postfix({
                     'Loss': f'{loss.item():.6f}',
                     'PCK@0.5': f'{accuracy:.4f}'
                 })
         
+        # Compute averages across all batches
         avg_loss = total_loss / num_batches
         avg_accuracy = total_accuracy / num_batches
         
+        # Store metrics for plotting
         self.val_losses.append(avg_loss)
         self.val_accuracies.append(avg_accuracy)
         
         return avg_loss, avg_accuracy
     
     def _compute_pck_accuracy(self, predicted_heatmaps: torch.Tensor, keypoints: torch.Tensor, threshold: float = 0.5) -> float:
-        """Compute PCK (Percentage of Correct Keypoints) accuracy"""
+        """
+        Compute PCK (Percentage of Correct Keypoints) accuracy.
+        
+        PCK measures the percentage of predicted keypoints that are within a
+        threshold distance from the ground truth keypoints. This is a standard
+        metric for pose estimation evaluation.
+        
+        Args:
+            predicted_heatmaps: Predicted heatmaps [B, num_joints, H, W]
+            keypoints: Ground truth keypoints [B, num_joints, 3] (x, y, visibility)
+            threshold: Distance threshold in pixels (default: 0.5)
+            
+        Returns:
+            PCK accuracy as a float (0.0 to 1.0)
+        """
         batch_size, num_joints, height, width = predicted_heatmaps.shape
         
-        # Get predicted keypoint locations
+        # Extract predicted keypoint locations from heatmaps
+        # Find the location with maximum heatmap value for each joint
         predicted_heatmaps_flat = predicted_heatmaps.view(batch_size, num_joints, -1)
-        _, max_indices = torch.max(predicted_heatmaps_flat, dim=2)
-        pred_y = max_indices // width
+        _, max_indices = torch.max(predicted_heatmaps_flat, dim=2)  # Find max value index
+        pred_y = max_indices // width  # Convert flat index to (y, x) coordinates
         pred_x = max_indices % width
         
-        # Scale keypoints to heatmap size
-        scale_x = width / 256.0  # Assuming input image size is 256x256
+        # Scale ground truth keypoints from image coordinates to heatmap coordinates
+        # Assuming input images are resized to 256x256 before being fed to the model
+        scale_x = width / 256.0
         scale_y = height / 256.0
         
-        gt_x = keypoints[:, :, 0] * scale_x
-        gt_y = keypoints[:, :, 1] * scale_y
+        gt_x = keypoints[:, :, 0] * scale_x  # Ground truth x coordinates
+        gt_y = keypoints[:, :, 1] * scale_y  # Ground truth y coordinates
         
-        # Compute distances
+        # Compute Euclidean distance between predicted and ground truth keypoints
         distances = torch.sqrt((pred_x.float() - gt_x) ** 2 + (pred_y.float() - gt_y) ** 2)
         
-        # Check visibility (keypoints[:, :, 2] > 0)
+        # Only consider visible keypoints (visibility flag > 0)
         visible = keypoints[:, :, 2] > 0
         
-        # Compute PCK
+        # Count keypoints that are within threshold distance and visible
         correct = (distances < threshold) & visible
+        
+        # Compute accuracy: correct keypoints / total visible keypoints
         accuracy = correct.sum().float() / visible.sum().float()
         
         return accuracy.item()
@@ -346,7 +419,16 @@ class PoseTrainer:
 
 
 def create_config() -> Dict:
-    """Create default training configuration"""
+    """
+    Create default training configuration dictionary.
+    
+    Returns a comprehensive configuration dictionary with all training
+    hyperparameters, model settings, data settings, and logging options.
+    This can be customized before training to adjust model behavior.
+    
+    Returns:
+        Dictionary containing all training configuration parameters
+    """
     return {
         # Model settings
         'model_type': 'simplebaseline',  # 'hrnet' or 'simplebaseline'
@@ -390,24 +472,37 @@ def create_config() -> Dict:
 
 
 def main():
-    """Main training function"""
-    # Set device
+    """
+    Main training function.
+    
+    Orchestrates the complete training pipeline:
+    1. Setup device (GPU/CPU)
+    2. Load configuration
+    3. Create data loaders
+    4. Initialize model
+    5. Create trainer
+    6. Start training loop
+    
+    All outputs (checkpoints, logs, plots) are saved to a timestamped
+    directory under outputs/training_YYYYMMDD_HHMMSS/
+    """
+    # Detect and set device (use GPU if available, otherwise CPU)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
     
-    # Create configuration
+    # Load training configuration
     config = create_config()
     
-    # Create output directory with timestamp
+    # Create timestamped output directory for this training run
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     config['output_dir'] = f"outputs/training_{timestamp}"
     
-    # Save configuration
+    # Save configuration to JSON file for reproducibility
     os.makedirs(config['output_dir'], exist_ok=True)
     with open(os.path.join(config['output_dir'], 'config.json'), 'w') as f:
         json.dump(config, f, indent=2)
     
-    # Create data loaders
+    # Create data loaders for training and validation sets
     print("Creating data loaders...")
     train_loader, val_loader = create_data_loaders(
         images_dir='images',
@@ -417,7 +512,7 @@ def main():
         train_split=config['train_split']
     )
     
-    # Check if dataset is empty
+    # Check if dataset is empty (no images found)
     if train_loader is None or val_loader is None:
         print("\n" + "="*60)
         print("ERROR: No training data found!")
@@ -432,13 +527,14 @@ def main():
         print("="*60)
         return
     
+    # Display dataset statistics
     train_size = len(train_loader.dataset)
     val_size = len(val_loader.dataset)
     
     print(f"Training samples: {train_size}")
     print(f"Validation samples: {val_size}")
     
-    # Create model
+    # Create model instance based on configuration
     print("Creating model...")
     model = create_model(
         model_type=config['model_type'],
@@ -446,7 +542,7 @@ def main():
         backbone=config.get('backbone', 'resnet50')
     )
     
-    # Create trainer
+    # Initialize trainer with model, data loaders, and configuration
     trainer = PoseTrainer(
         model=model,
         train_loader=train_loader,
@@ -455,7 +551,7 @@ def main():
         config=config
     )
     
-    # Start training
+    # Start the training loop
     trainer.train()
 
 

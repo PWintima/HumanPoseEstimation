@@ -1,3 +1,16 @@
+"""
+Neural Network Model Architectures for Human Pose Estimation
+
+This module implements two main architectures:
+1. HRNet (High-Resolution Network) - State-of-the-art architecture that maintains
+   high-resolution representations throughout the network
+2. SimpleBaseline - A simpler architecture using ResNet backbone with deconvolution
+   layers for upsampling
+
+Both models output heatmaps representing the probability distribution of each
+joint/keypoint location in the image.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,32 +19,67 @@ from typing import List, Tuple, Optional
 import math
 
 class BasicBlock(nn.Module):
-    """Basic residual block"""
+    """
+    Basic residual block for ResNet architectures.
+    
+    Implements a residual connection (skip connection) that helps with gradient
+    flow during training. The block consists of two 3x3 convolutions with batch
+    normalization and ReLU activation.
+    
+    Attributes:
+        expansion: Expansion factor for output channels (1 for BasicBlock)
+    """
     expansion = 1
     
     def __init__(self, inplanes, planes, stride=1, downsample=None):
+        """
+        Initialize BasicBlock.
+        
+        Args:
+            inplanes: Number of input channels
+            planes: Number of output channels (base, before expansion)
+            stride: Stride for the first convolution (default: 1)
+            downsample: Optional downsampling layer for residual connection
+        """
         super(BasicBlock, self).__init__()
+        # First 3x3 convolution with optional stride
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.relu = nn.ReLU(inplace=True)
+        self.bn1 = nn.BatchNorm2d(planes)  # Batch normalization for stability
+        self.relu = nn.ReLU(inplace=True)  # In-place ReLU for memory efficiency
+        
+        # Second 3x3 convolution (always stride=1)
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(planes)
-        self.downsample = downsample
+        self.downsample = downsample  # For matching dimensions in residual connection
         self.stride = stride
     
     def forward(self, x):
+        """
+        Forward pass through the residual block.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            
+        Returns:
+            Output tensor with residual connection applied
+        """
+        # Save input for residual connection
         residual = x
         
+        # First convolution block
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
         
+        # Second convolution block
         out = self.conv2(out)
         out = self.bn2(out)
         
+        # Apply downsampling to residual if needed (for dimension matching)
         if self.downsample is not None:
             residual = self.downsample(x)
         
+        # Add residual connection (skip connection)
         out += residual
         out = self.relu(out)
         
@@ -39,15 +87,38 @@ class BasicBlock(nn.Module):
 
 
 class Bottleneck(nn.Module):
-    """Bottleneck residual block"""
+    """
+    Bottleneck residual block for deeper ResNet architectures (ResNet50+).
+    
+    Uses a 1x1 -> 3x3 -> 1x1 convolution pattern to reduce computational cost
+    while maintaining representational power. The expansion factor is 4, meaning
+    the output channels are 4x the base planes parameter.
+    
+    Attributes:
+        expansion: Expansion factor for output channels (4 for Bottleneck)
+    """
     expansion = 4
     
     def __init__(self, inplanes, planes, stride=1, downsample=None):
+        """
+        Initialize Bottleneck block.
+        
+        Args:
+            inplanes: Number of input channels
+            planes: Base number of channels (output will be planes * expansion)
+            stride: Stride for the middle 3x3 convolution
+            downsample: Optional downsampling layer for residual connection
+        """
         super(Bottleneck, self).__init__()
+        # 1x1 convolution to reduce channels (bottleneck)
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes)
+        
+        # 3x3 convolution (main feature extraction)
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(planes)
+        
+        # 1x1 convolution to expand channels back
         self.conv3 = nn.Conv2d(planes, planes * self.expansion, kernel_size=1, bias=False)
         self.bn3 = nn.BatchNorm2d(planes * self.expansion)
         self.relu = nn.ReLU(inplace=True)
@@ -55,22 +126,37 @@ class Bottleneck(nn.Module):
         self.stride = stride
     
     def forward(self, x):
+        """
+        Forward pass through the bottleneck block.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            
+        Returns:
+            Output tensor with residual connection applied
+        """
+        # Save input for residual connection
         residual = x
         
+        # 1x1 conv: reduce channels
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
         
+        # 3x3 conv: main feature extraction
         out = self.conv2(out)
         out = self.bn2(out)
         out = self.relu(out)
         
+        # 1x1 conv: expand channels
         out = self.conv3(out)
         out = self.bn3(out)
         
+        # Apply downsampling to residual if needed
         if self.downsample is not None:
             residual = self.downsample(x)
         
+        # Add residual connection
         out += residual
         out = self.relu(out)
         
@@ -78,19 +164,43 @@ class Bottleneck(nn.Module):
 
 
 class HighResolutionModule(nn.Module):
-    """High-Resolution Module for HRNet"""
+    """
+    High-Resolution Module for HRNet architecture.
+    
+    HRNet maintains high-resolution representations throughout the network by
+    processing multiple resolution branches in parallel and fusing them together.
+    This module handles the multi-branch processing and fusion operations.
+    
+    The module processes features at multiple resolutions simultaneously and
+    exchanges information between branches through fusion layers.
+    """
     
     def __init__(self, num_branches, blocks, num_blocks, num_inchannels, num_channels, fuse_method, multi_scale_output=True):
+        """
+        Initialize HighResolutionModule.
+        
+        Args:
+            num_branches: Number of parallel resolution branches
+            blocks: Block type (BasicBlock or Bottleneck)
+            num_blocks: Number of blocks per branch
+            num_inchannels: List of input channels for each branch
+            num_channels: List of output channels for each branch
+            fuse_method: Method for fusing branches ('SUM' or 'AVG')
+            multi_scale_output: Whether to output multi-scale features
+        """
         super(HighResolutionModule, self).__init__()
+        # Validate that all branch parameters match
         self._check_branches(num_branches, blocks, num_blocks, num_inchannels, num_channels)
         
-        self.num_inchannels = num_inchannels
-        self.fuse_method = fuse_method
-        self.num_branches = num_branches
+        self.num_inchannels = num_inchannels  # Input channels per branch
+        self.fuse_method = fuse_method  # Fusion method ('SUM' or 'AVG')
+        self.num_branches = num_branches  # Number of parallel branches
         
-        self.multi_scale_output = multi_scale_output
+        self.multi_scale_output = multi_scale_output  # Output all scales or just highest
         
+        # Create parallel branches (each processes features at different resolution)
         self.branches = self._make_branches(num_branches, blocks, num_blocks, num_channels)
+        # Create fusion layers to exchange information between branches
         self.fuse_layers = self._make_fuse_layers()
         self.relu = nn.ReLU(True)
     
@@ -187,38 +297,66 @@ class HighResolutionModule(nn.Module):
 
 
 class HRNet(nn.Module):
-    """HRNet (High-Resolution Network) for pose estimation"""
+    """
+    HRNet (High-Resolution Network) for pose estimation.
+    
+    HRNet maintains high-resolution representations throughout the entire network,
+    unlike traditional networks that downsample early and upsample late. This leads
+    to better localization accuracy for dense prediction tasks like pose estimation.
+    
+    Architecture:
+    - Stage 1: Initial convolutions (downsample to 1/4 resolution)
+    - Stage 2: ResNet-like bottleneck blocks
+    - Stage 3-5: Multi-resolution branches with fusion
+    - Final: 1x1 conv to output joint heatmaps
+    
+    Args:
+        num_joints: Number of body joints/keypoints to detect (default: 16 for MPII)
+        width: Base width multiplier for channels (default: 18)
+    """
     
     def __init__(self, num_joints=16, width=18):
+        """
+        Initialize HRNet model.
+        
+        Args:
+            num_joints: Number of joints/keypoints to predict
+            width: Base channel width multiplier
+        """
         super(HRNet, self).__init__()
         
-        self.num_joints = num_joints
-        self.width = width
+        self.num_joints = num_joints  # Number of output heatmaps (one per joint)
+        self.width = width  # Channel width multiplier
         
-        # Stage 1
+        # Stage 1: Initial feature extraction (downsample to 1/4 resolution)
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.conv2 = nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
         
-        # Stage 2
+        # Stage 2: ResNet bottleneck blocks (further feature extraction)
         self.layer1 = self._make_layer(Bottleneck, 64, 4)
         
-        # Stage 3
+        # Stage 3: Start multi-resolution branches
+        # Create 4 branches with increasing channel counts: [18, 36, 72, 144]
         num_channels = [self.width * 2 ** i for i in range(4)]
+        # Transition layer: split single branch into 4 branches
         self.transition1 = self._make_transition_layer([256], num_channels)
+        # Stage 2: 1 HR module with 4 branches
         self.stage2, pre_stage_channels = self._make_stage(HighResolutionModule, 4, 1, num_channels, num_channels)
         
-        # Stage 4
+        # Stage 4: Continue multi-resolution processing
         self.transition2 = self._make_transition_layer(num_channels, num_channels)
+        # Stage 3: 4 HR modules with 4 branches
         self.stage3, pre_stage_channels = self._make_stage(HighResolutionModule, 4, 4, num_channels, num_channels)
         
-        # Stage 5
+        # Stage 5: Final multi-resolution stage
         self.transition3 = self._make_transition_layer(num_channels, num_channels)
+        # Stage 4: 3 HR modules with 4 branches
         self.stage4, pre_stage_channels = self._make_stage(HighResolutionModule, 4, 3, num_channels, num_channels)
         
-        # Final layers
+        # Final layer: Convert highest resolution features to joint heatmaps
         self.final_layer = nn.Conv2d(pre_stage_channels[0], num_joints, kernel_size=1, stride=1, padding=0)
         
     def _make_layer(self, block, planes, blocks, stride=1):
@@ -324,18 +462,41 @@ class HRNet(nn.Module):
 
 
 class SimpleBaseline(nn.Module):
-    """Simple Baseline model for pose estimation"""
+    """
+    Simple Baseline model for pose estimation.
+    
+    A simpler architecture compared to HRNet that uses:
+    1. A pre-trained ResNet backbone for feature extraction
+    2. Deconvolution layers to upsample features back to input resolution
+    3. A final 1x1 convolution to predict joint heatmaps
+    
+    This architecture is faster to train and requires less memory than HRNet,
+    making it a good starting point for pose estimation tasks.
+    
+    Args:
+        num_joints: Number of body joints/keypoints to detect
+        backbone: Backbone architecture ('resnet50' or 'resnet101')
+    """
     
     def __init__(self, num_joints=16, backbone='resnet50'):
+        """
+        Initialize SimpleBaseline model.
+        
+        Args:
+            num_joints: Number of joints/keypoints to predict
+            backbone: ResNet backbone type ('resnet50' or 'resnet101')
+        """
         super(SimpleBaseline, self).__init__()
         
         self.num_joints = num_joints
         
-        # Load backbone
+        # Load pre-trained ResNet backbone
+        # Remove the final average pooling and fully connected layers
+        # We only need the convolutional feature extractor
         if backbone == 'resnet50':
             self.backbone = models.resnet50(pretrained=True)
             self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])  # Remove avgpool and fc
-            backbone_dim = 2048
+            backbone_dim = 2048  # ResNet50/101 output channels
         elif backbone == 'resnet101':
             self.backbone = models.resnet101(pretrained=True)
             self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])
@@ -343,26 +504,40 @@ class SimpleBaseline(nn.Module):
         else:
             raise ValueError(f"Unsupported backbone: {backbone}")
         
-        # Deconvolution layers
+        # Deconvolution layers: upsample from 1/32 resolution to 1/4 resolution
+        # (3 deconv layers: 1/32 -> 1/16 -> 1/8 -> 1/4)
         self.deconv_layers = self._make_deconv_layers(backbone_dim, 256)
         
-        # Final prediction layer
+        # Final prediction layer: convert features to joint heatmaps
         self.final_layer = nn.Conv2d(256, num_joints, kernel_size=1, stride=1, padding=0)
         
     def _make_deconv_layers(self, in_channels, out_channels):
+        """
+        Create deconvolution (transposed convolution) layers for upsampling.
+        
+        Each deconv layer doubles the spatial resolution (stride=2) and maintains
+        the same number of channels. Three layers upsample from 1/32 to 1/4 resolution.
+        
+        Args:
+            in_channels: Input channels (from backbone output)
+            out_channels: Output channels for deconv layers
+            
+        Returns:
+            Sequential module containing deconv layers
+        """
         layers = []
         
-        # First deconv layer
+        # First deconv layer: 1/32 -> 1/16 resolution
         layers.append(nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1))
         layers.append(nn.BatchNorm2d(out_channels))
         layers.append(nn.ReLU(inplace=True))
         
-        # Second deconv layer
+        # Second deconv layer: 1/16 -> 1/8 resolution
         layers.append(nn.ConvTranspose2d(out_channels, out_channels, kernel_size=4, stride=2, padding=1))
         layers.append(nn.BatchNorm2d(out_channels))
         layers.append(nn.ReLU(inplace=True))
         
-        # Third deconv layer
+        # Third deconv layer: 1/8 -> 1/4 resolution
         layers.append(nn.ConvTranspose2d(out_channels, out_channels, kernel_size=4, stride=2, padding=1))
         layers.append(nn.BatchNorm2d(out_channels))
         layers.append(nn.ReLU(inplace=True))
@@ -370,20 +545,46 @@ class SimpleBaseline(nn.Module):
         return nn.Sequential(*layers)
     
     def forward(self, x):
-        # Extract features using backbone
+        """
+        Forward pass through SimpleBaseline model.
+        
+        Args:
+            x: Input image tensor [B, 3, H, W]
+            
+        Returns:
+            Heatmaps tensor [B, num_joints, H/4, W/4]
+        """
+        # Extract features using ResNet backbone (outputs at 1/32 resolution)
         features = self.backbone(x)
         
-        # Apply deconvolution layers
+        # Upsample features using deconvolution layers (1/32 -> 1/4 resolution)
         x = self.deconv_layers(features)
         
-        # Final prediction
+        # Final prediction: convert features to joint heatmaps
         heatmaps = self.final_layer(x)
         
         return heatmaps
 
 
 def create_model(model_type='hrnet', num_joints=16, **kwargs):
-    """Create pose estimation model"""
+    """
+    Factory function to create pose estimation models.
+    
+    This function provides a convenient way to instantiate different model
+    architectures with consistent interface.
+    
+    Args:
+        model_type: Type of model ('hrnet' or 'simplebaseline')
+        num_joints: Number of joints/keypoints to predict
+        **kwargs: Additional arguments passed to model constructor
+        
+    Returns:
+        Initialized model instance
+        
+    Example:
+        >>> model = create_model('simplebaseline', num_joints=16, backbone='resnet50')
+        >>> model = create_model('hrnet', num_joints=16, width=18)
+    """
     if model_type.lower() == 'hrnet':
         return HRNet(num_joints=num_joints, **kwargs)
     elif model_type.lower() == 'simplebaseline':
