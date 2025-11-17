@@ -343,16 +343,21 @@ def create_data_loaders(images_dir: str,
         is_training=True
     )
     
-    # Split dataset
-    train_size = int(train_split * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size]
-    )
-    
-    # Update training flag for validation dataset
-    val_dataset.dataset.is_training = False
+    # Check if dataset is empty
+    if len(full_dataset) == 0:
+        # Return None to indicate empty dataset (will be handled in train.py)
+        return None, None
+    else:
+        # Split dataset
+        train_size = int(train_split * len(full_dataset))
+        val_size = len(full_dataset) - train_size
+        
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, val_size]
+        )
+        
+        # Update training flag for validation dataset
+        val_dataset.dataset.is_training = False
     
     # Create data loaders
     train_loader = DataLoader(

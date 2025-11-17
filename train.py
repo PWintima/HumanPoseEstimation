@@ -417,8 +417,26 @@ def main():
         train_split=config['train_split']
     )
     
-    print(f"Training samples: {len(train_loader.dataset)}")
-    print(f"Validation samples: {len(val_loader.dataset)}")
+    # Check if dataset is empty
+    if train_loader is None or val_loader is None:
+        print("\n" + "="*60)
+        print("ERROR: No training data found!")
+        print("="*60)
+        print("Please ensure:")
+        print("1. Images are placed in the 'images/' directory")
+        print("2. Images are in .jpg, .jpeg, or .png format")
+        print("3. The 'images/' directory exists and is accessible")
+        print("\nAlternatively, you can:")
+        print("- Run stage3_main.py to prepare your dataset")
+        print("- Or place your images in the 'images/' directory")
+        print("="*60)
+        return
+    
+    train_size = len(train_loader.dataset)
+    val_size = len(val_loader.dataset)
+    
+    print(f"Training samples: {train_size}")
+    print(f"Validation samples: {val_size}")
     
     # Create model
     print("Creating model...")
