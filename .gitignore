@@ -19,3 +19,5 @@ env/
 #Exclude IDE/project files
 .idea/
 .vscode/
+# Ignore generated final overlays
+outputs/final_overlays/
