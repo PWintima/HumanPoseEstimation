@@ -50,10 +50,10 @@ with mp_pose.Pose(
     results = pose.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         
         # Draw pose landmarks on a copy of the image
-    annotated_image = image.copy()
+        annotated_image = image.copy()
         mp_drawing.draw_landmarks(
-            annotated_image, 
-            results.pose_landmarks, 
+            annotated_image,
+            results.pose_landmarks,
             mp_pose.POSE_CONNECTIONS
         )
         
