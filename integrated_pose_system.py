@@ -176,7 +176,7 @@ class PoseClassifier:
             
             if (abs(shoulder_y - wrist_y_avg) < 50 and r_arm_extended and l_arm_extended):
                 # Add finger details if available
-                finger_info = ""
+                details = ["both arms extended straight out to your sides", "forming a perfect cross shape with your body", "shoulders and wrists aligned horizontally"]
                 if num_keypoints == 33:
                     visible_fingers = []
                     if r_pinky is not None: visible_fingers.append("right pinky")
@@ -184,8 +184,8 @@ class PoseClassifier:
                     if r_index is not None: visible_fingers.append("right index")
                     if l_index is not None: visible_fingers.append("left index")
                     if visible_fingers:
-                        finger_info = f" | Fingers visible: {', '.join(visible_fingers)}"
-                return f"T-Pose: Arms extended horizontally, body in cross shape{finger_info}"
+                        details.append(f"fingers visible: {', '.join(visible_fingers)}")
+                return f"You're in a T-pose with {', '.join(details)}"
         
         # Check for Arms Raised (both wrists above shoulders)
         if (r_shoulder is not None and l_shoulder is not None and
@@ -198,23 +198,23 @@ class PoseClassifier:
                     r_angle = self.calculate_angle(r_shoulder, r_elbow, r_wrist)
                     l_angle = self.calculate_angle(l_shoulder, l_elbow, l_wrist)
                     if r_angle > 150 and l_angle > 150:
-                        details = ["arms fully extended", "reaching upward"]
+                        details = ["both arms fully extended straight up", "reaching toward the ceiling", "hands positioned high above your head"]
                         if num_keypoints == 33:
                             if (r_index is not None and r_index[1] < r_wrist[1]) or (l_index is not None and l_index[1] < l_wrist[1]):
-                                details.append("fingers extended")
+                                details.append("fingers extended upward")
                             if r_thumb is not None or l_thumb is not None:
-                                details.append("thumbs visible")
-                        return f"Arms Raised Up: Both arms straight up, reaching for the sky | {', '.join(details)}"
+                                details.append("thumbs visible and extended")
+                        return f"You're raising both arms straight up above your head, {', '.join(details)}"
                 # Check finger positions for more detail
-                details = ["hands elevated", "upper body engaged"]
+                details = ["both hands elevated above your shoulders", "upper body actively engaged", "arms raised in an upward position"]
                 if num_keypoints == 33:
                     if (r_index is not None and r_index[1] < r_wrist[1]) or (l_index is not None and l_index[1] < l_wrist[1]):
-                        details.append("fingers pointing up")
+                        details.append("fingers pointing upward")
                     finger_count = sum([r_pinky is not None, l_pinky is not None, 
                                       r_index is not None, l_index is not None])
                     if finger_count >= 2:
-                        details.append(f"{finger_count} finger tips visible")
-                return f"Arms Raised: Both hands above shoulders, active upper body | {', '.join(details)}"
+                        details.append(f"{finger_count} finger tips clearly visible")
+                return f"You're raising both hands above your shoulders with your arms elevated, {', '.join(details)}"
         
         # Check for Hands on Hips (wrists near hips)
         if (r_hip is not None and l_hip is not None and
@@ -224,13 +224,13 @@ class PoseClassifier:
             l_dist = self.calculate_distance(l_wrist, l_hip)
             
             if r_dist < 80 and l_dist < 80:
-                details = ["confident posture", "ready stance"]
+                details = ["standing in a confident and assertive posture", "hands positioned firmly on your hips", "body language showing readiness"]
                 if num_keypoints == 33:
                     if (r_thumb is not None and r_thumb[0] > r_wrist[0]) or (l_thumb is not None and l_thumb[0] < l_wrist[0]):
-                        details.append("thumbs forward")
+                        details.append("thumbs pointing forward")
                     if r_pinky is not None or l_pinky is not None:
-                        details.append("hands positioned on hips")
-                return f"Hands on Hips: Confident stance, assertive body language | {', '.join(details)}"
+                        details.append("fingers spread across your hip area")
+                return f"You have your hands on your hips, {', '.join(details)}"
         
         # Check for One Arm Raised
         if (r_shoulder is not None and l_shoulder is not None):
@@ -241,55 +241,55 @@ class PoseClassifier:
                 if r_elbow is not None:
                     elbow_angle = self.calculate_angle(r_shoulder, r_elbow, r_wrist)
                     if 90 < elbow_angle < 150:
-                        details = ["waving motion", "friendly gesture"]
+                        details = ["making a friendly waving motion with your right hand", "elbow bent in a natural greeting gesture", "showing a welcoming interaction"]
                         if num_keypoints == 33:
                             if r_index is not None and r_pinky is not None:
-                                details.append("fingers spread")
+                                details.append("fingers spread in an open hand position")
                             if r_thumb is not None:
-                                details.append("thumb visible")
-                        return f"Right Hand Waving: Greeting gesture, friendly interaction | {', '.join(details)}"
+                                details.append("thumb clearly visible")
+                        return f"You're waving with your right hand, {', '.join(details)}"
                     elif r_wrist[1] < r_elbow[1]:
-                        details = ["arm extended upward", "reaching high"]
+                        details = ["your right arm fully extended upward", "reaching high above your head", "hand positioned well above your shoulder"]
                         if num_keypoints == 33:
                             if r_index is not None and r_index[1] < r_wrist[1]:
-                                details.append("index finger pointing up")
+                                details.append("index finger pointing straight up")
                             if r_pinky is not None:
-                                details.append("hand fully visible")
-                        return f"Right Arm Raised: Hand above head, reaching upward | {', '.join(details)}"
-                details = ["right arm elevated", "signaling"]
+                                details.append("entire hand clearly visible")
+                        return f"You're raising your right hand straight up above your head, {', '.join(details)}"
+                details = ["your right arm elevated above your shoulder", "actively signaling or reaching upward", "right hand positioned higher than your shoulder level"]
                 if num_keypoints == 33:
                     if r_index is not None:
-                        details.append("index finger detected")
+                        details.append("index finger clearly detected")
                     if r_thumb is not None:
-                        details.append("thumb visible")
-                return f"Right Arm Raised: Right hand up, active signaling | {', '.join(details)}"
+                        details.append("thumb visible and extended")
+                return f"You're raising your right hand up above your shoulder, {', '.join(details)}"
             if l_wrist is not None and l_wrist[1] < shoulder_y_avg - 30:
                 # Check if it's a wave or just raised
                 if l_elbow is not None:
                     elbow_angle = self.calculate_angle(l_shoulder, l_elbow, l_wrist)
                     if 90 < elbow_angle < 150:
-                        details = ["waving motion", "friendly gesture"]
+                        details = ["making a friendly waving motion with your left hand", "elbow bent in a natural greeting gesture", "showing a welcoming interaction"]
                         if num_keypoints == 33:
                             if l_index is not None and l_pinky is not None:
-                                details.append("fingers spread")
+                                details.append("fingers spread in an open hand position")
                             if l_thumb is not None:
-                                details.append("thumb visible")
-                        return f"Left Hand Waving: Greeting gesture, friendly interaction | {', '.join(details)}"
+                                details.append("thumb clearly visible")
+                        return f"You're waving with your left hand, {', '.join(details)}"
                     elif l_wrist[1] < l_elbow[1]:
-                        details = ["arm extended upward", "reaching high"]
+                        details = ["your left arm fully extended upward", "reaching high above your head", "hand positioned well above your shoulder"]
                         if num_keypoints == 33:
                             if l_index is not None and l_index[1] < l_wrist[1]:
-                                details.append("index finger pointing up")
+                                details.append("index finger pointing straight up")
                             if l_pinky is not None:
-                                details.append("hand fully visible")
-                        return f"Left Arm Raised: Hand above head, reaching upward | {', '.join(details)}"
-                details = ["left arm elevated", "signaling"]
+                                details.append("entire hand clearly visible")
+                        return f"You're raising your left hand straight up above your head, {', '.join(details)}"
+                details = ["your left arm elevated above your shoulder", "actively signaling or reaching upward", "left hand positioned higher than your shoulder level"]
                 if num_keypoints == 33:
                     if l_index is not None:
-                        details.append("index finger detected")
+                        details.append("index finger clearly detected")
                     if l_thumb is not None:
-                        details.append("thumb visible")
-                return f"Left Arm Raised: Left hand up, active signaling | {', '.join(details)}"
+                        details.append("thumb visible and extended")
+                return f"You're raising your left hand up above your shoulder, {', '.join(details)}"
         
         # Check for Sitting (knees bent, hips lower relative to knees)
         if (r_hip is not None and l_hip is not None and
@@ -300,47 +300,62 @@ class PoseClassifier:
             
             # If hips are close to knees (bent position)
             if abs(hip_y_avg - knee_y_avg) < 100:
-                return "Sitting: Knees bent, seated position"
+                details = ["sitting down with your knees bent", "in a seated position", "hips positioned close to your knees"]
+                if num_keypoints == 33:
+                    r_ankle_pt = get_point(28)
+                    l_ankle_pt = get_point(27)
+                    if r_ankle_pt is not None and l_ankle_pt is not None:
+                        details.append("feet positioned on the ground")
+                return f"You're {', '.join(details)}"
         
         # Check for Standing Straight (hips and shoulders aligned vertically)
         if (thorax is not None and r_hip is not None and l_hip is not None):
             hip_y_avg = (r_hip[1] + l_hip[1]) / 2
             if abs(thorax[0] - (r_hip[0] + l_hip[0]) / 2) < 30:
-                return "Standing Straight: Upright posture"
+                details = ["standing straight up with good posture", "body aligned vertically", "shoulders and hips in proper alignment"]
+                return f"You're {', '.join(details)}"
         
         # Check for waving with one arm
         if r_wrist is not None and r_elbow is not None and r_shoulder is not None:
             r_angle = self.calculate_angle(r_shoulder, r_elbow, r_wrist)
             if 80 < r_angle < 140 and r_wrist[1] < r_shoulder[1]:
-                return "Right Hand Waving: Greeting gesture"
+                details = ["making a greeting gesture", "moving your right hand in a friendly waving motion"]
+                if num_keypoints == 33:
+                    if r_index is not None or r_pinky is not None:
+                        details.append("fingers visible in the waving motion")
+                return f"You're waving with your right hand, {', '.join(details)}"
         
         if l_wrist is not None and l_elbow is not None and l_shoulder is not None:
             l_angle = self.calculate_angle(l_shoulder, l_elbow, l_wrist)
             if 80 < l_angle < 140 and l_wrist[1] < l_shoulder[1]:
-                return "Left Hand Waving: Greeting gesture"
+                details = ["making a greeting gesture", "moving your left hand in a friendly waving motion"]
+                if num_keypoints == 33:
+                    if l_index is not None or l_pinky is not None:
+                        details.append("fingers visible in the waving motion")
+                return f"You're waving with your left hand, {', '.join(details)}"
         
         # Check for pointing gesture
         if r_wrist is not None and r_elbow is not None and r_shoulder is not None:
             r_angle = self.calculate_angle(r_shoulder, r_elbow, r_wrist)
             if r_angle > 160 and r_wrist[0] > r_shoulder[0]:
-                details = ["arm extended forward", "directing attention"]
+                details = ["extending your right arm straight forward", "directing attention ahead of you", "arm fully extended in front"]
                 if num_keypoints == 33:
                     if r_index is not None and r_index[0] > r_wrist[0]:
-                        details.append("index finger extended")
+                        details.append("index finger extended and pointing forward")
                     if r_thumb is not None:
-                        details.append("thumb visible")
-                return f"Right Hand Pointing: Extended forward, directing attention | {', '.join(details)}"
+                        details.append("thumb clearly visible")
+                return f"You're pointing forward with your right hand, {', '.join(details)}"
         
         if l_wrist is not None and l_elbow is not None and l_shoulder is not None:
             l_angle = self.calculate_angle(l_shoulder, l_elbow, l_wrist)
             if l_angle > 160 and l_wrist[0] < l_shoulder[0]:
-                details = ["arm extended forward", "directing attention"]
+                details = ["extending your left arm straight forward", "directing attention ahead of you", "arm fully extended in front"]
                 if num_keypoints == 33:
                     if l_index is not None and l_index[0] < l_wrist[0]:
-                        details.append("index finger extended")
+                        details.append("index finger extended and pointing forward")
                     if l_thumb is not None:
-                        details.append("thumb visible")
-                return f"Left Hand Pointing: Extended forward, directing attention | {', '.join(details)}"
+                        details.append("thumb clearly visible")
+                return f"You're pointing forward with your left hand, {', '.join(details)}"
         
         # Try to classify with minimal keypoints (at least shoulders and hips)
         if (r_shoulder is not None or l_shoulder is not None) and (r_hip is not None or l_hip is not None):
@@ -349,35 +364,35 @@ class PoseClassifier:
                 shoulder_y_avg = ((r_shoulder[1] if r_shoulder is not None else 0) + 
                                 (l_shoulder[1] if l_shoulder is not None else 0)) / 2
                 if r_wrist[1] > shoulder_y_avg + 50 and l_wrist[1] > shoulder_y_avg + 50:
-                    details = ["arms at sides", "relaxed posture"]
+                    details = ["standing upright with your arms hanging straight down at your sides", "in a relaxed and natural posture", "body in a balanced stance"]
                     if num_keypoints == 33:
                         finger_count = sum([r_pinky is not None, l_pinky is not None, 
                                           r_index is not None, l_index is not None,
                                           r_thumb is not None, l_thumb is not None])
                         if finger_count > 0:
-                            details.append(f"{finger_count} finger keypoints visible")
+                            details.append(f"{finger_count} finger keypoints clearly visible")
                         if r_thumb is not None or l_thumb is not None:
-                            details.append("thumbs detected")
-                    return f"Standing: Arms at sides, relaxed posture, natural stance | {', '.join(details)}"
+                            details.append("thumbs detected and visible")
+                    return f"You're {', '.join(details)}"
             # Add more context about body position
-            details = ["neutral pose", "balanced position"]
+            details = ["standing in a neutral pose", "body in a balanced and centered position", "maintaining an upright stance"]
             if num_keypoints == 33:
                 if head is not None and thorax is not None:
                     head_angle = np.arctan2(head[1] - thorax[1], head[0] - thorax[0]) * 180 / np.pi
                     if abs(head_angle) < 20:
-                        details.append("head aligned with body")
+                        details.append("head aligned with your body")
                 finger_count = sum([r_pinky is not None, l_pinky is not None, 
                                   r_index is not None, l_index is not None])
                 if finger_count > 0:
-                    details.append(f"{finger_count} finger tips visible")
-            return f"Standing: Neutral pose, balanced position | {', '.join(details)}"
+                    details.append(f"{finger_count} finger tips clearly visible")
+            return f"You're {', '.join(details)}"
         
         # If we have any keypoints at all, show detecting
         if visible_count > 0:
-            return f"Detecting Pose... ({visible_count}/{num_keypoints} keypoints)"
+            return f"Detecting pose... ({visible_count}/{num_keypoints} keypoints visible)"
         
         # Default: Standing
-        return "Standing: Neutral position"
+        return "You're standing in a neutral position"
 
 
 class IntegratedPoseSystem:
