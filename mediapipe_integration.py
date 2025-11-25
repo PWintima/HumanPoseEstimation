@@ -146,49 +146,71 @@ class MediaPipePoseEstimator:
         
         return annotated_image, results
     
-    def extract_keypoints(self, results, image_shape: Tuple[int, int]) -> np.ndarray:
+    def extract_keypoints(self, results, image_shape: Tuple[int, int], use_33_keypoints: bool = True) -> np.ndarray:
         """
-        Extract keypoints in MPII format
+        Extract keypoints from MediaPipe results.
         
         Args:
             results: MediaPipe results
             image_shape: (height, width) of image
+            use_33_keypoints: If True, return all 33 MediaPipe keypoints; if False, return 16 MPII format
         
         Returns:
-            Keypoints array [16, 3] (x, y, visibility)
+            Keypoints array [33, 3] or [16, 3] (x, y, visibility)
         """
-        keypoints = np.zeros((16, 3))
-        
-        if results.pose_landmarks:
-            landmarks = results.pose_landmarks.landmark
+        if use_33_keypoints:
+            # Return all 33 MediaPipe keypoints
+            keypoints = np.zeros((33, 3))
             
-            # Map MediaPipe landmarks to MPII format
-            for mp_landmark_name, mpii_idx in self.mpii_mapping.items():
-                if hasattr(landmarks, mp_landmark_name):
-                    landmark = getattr(landmarks, mp_landmark_name)
-                    keypoints[mpii_idx, 0] = landmark.x * image_shape[1]  # x
-                    keypoints[mpii_idx, 1] = landmark.y * image_shape[0]  # y
-                    keypoints[mpii_idx, 2] = landmark.visibility  # visibility
-        
-            # Calculate pelvis (midpoint between hips)
-            if keypoints[2, 2] > 0 and keypoints[3, 2] > 0:  # Both hips visible
-                keypoints[6, 0] = (keypoints[2, 0] + keypoints[3, 0]) / 2
-                keypoints[6, 1] = (keypoints[2, 1] + keypoints[3, 1]) / 2
-                keypoints[6, 2] = min(keypoints[2, 2], keypoints[3, 2])
+            if results.pose_landmarks:
+                landmarks = results.pose_landmarks.landmark
+                
+                # Extract all 33 MediaPipe landmarks directly
+                for i, landmark in enumerate(landmarks):
+                    keypoints[i, 0] = landmark.x * image_shape[1]  # x
+                    keypoints[i, 1] = landmark.y * image_shape[0]  # y
+                    keypoints[i, 2] = landmark.visibility  # visibility
             
-            # Calculate thorax (midpoint between shoulders)
-            if keypoints[12, 2] > 0 and keypoints[13, 2] > 0:  # Both shoulders visible
-                keypoints[7, 0] = (keypoints[12, 0] + keypoints[13, 0]) / 2
-                keypoints[7, 1] = (keypoints[12, 1] + keypoints[13, 1]) / 2
-                keypoints[7, 2] = min(keypoints[12, 2], keypoints[13, 2])
+            return keypoints
+        else:
+            # Legacy: Return 16 keypoints in MPII format
+            keypoints = np.zeros((16, 3))
             
-            # Calculate upper neck (midpoint between thorax and head)
-            if keypoints[7, 2] > 0 and keypoints[9, 2] > 0:  # Thorax and head visible
-                keypoints[8, 0] = (keypoints[7, 0] + keypoints[9, 0]) / 2
-                keypoints[8, 1] = (keypoints[7, 1] + keypoints[9, 1]) / 2
-                keypoints[8, 2] = min(keypoints[7, 2], keypoints[9, 2])
-        
-        return keypoints
+            if results.pose_landmarks:
+                landmarks = results.pose_landmarks.landmark
+                
+                # MediaPipe landmark indices
+                mp_landmark_map = {
+                    'nose': 0,
+                    'left_eye_inner': 1, 'left_eye': 2, 'left_eye_outer': 3,
+                    'right_eye_inner': 4, 'right_eye': 5, 'right_eye_outer': 6,
+                    'left_ear': 7, 'right_ear': 8,
+                    'mouth_left': 9, 'mouth_right': 10,
+                    'left_shoulder': 11, 'right_shoulder': 12,
+                    'left_elbow': 13, 'right_elbow': 14,
+                    'left_wrist': 15, 'right_wrist': 16,
+                    'left_pinky': 17, 'right_pinky': 18,
+                    'left_index': 19, 'right_index': 20,
+                    'left_thumb': 21, 'right_thumb': 22,
+                    'left_hip': 23, 'right_hip': 24,
+                    'left_knee': 25, 'right_knee': 26,
+                    'left_ankle': 27, 'right_ankle': 28,
+                    'left_heel': 29, 'right_heel': 30,
+                    'left_foot_index': 31, 'right_foot_index': 32
+                }
+                
+                # Map MediaPipe landmarks to MPII format
+                for mp_name, mp_idx in mp_landmark_map.items():
+                    if mp_idx < len(landmarks):
+                        landmark = landmarks[mp_idx]
+                        if mp_name in self.mpii_mapping:
+                            mpii_idx = self.mpii_mapping[mp_name]
+                            if keypoints[mpii_idx, 2] < landmark.visibility:
+                                keypoints[mpii_idx, 0] = landmark.x * image_shape[1]
+                                keypoints[mpii_idx, 1] = landmark.y * image_shape[0]
+                                keypoints[mpii_idx, 2] = landmark.visibility
+            
+            return keypoints
     
     def process_video(self, 
                      video_path: str, 

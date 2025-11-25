@@ -47,7 +47,7 @@ with mp_pose.Pose(
         image_height, image_width, _ = image.shape
         
         # Convert BGR to RGB (MediaPipe expects RGB format)
-    results = pose.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        results = pose.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         
         # Draw pose landmarks on a copy of the image
         annotated_image = image.copy()
@@ -58,7 +58,7 @@ with mp_pose.Pose(
         )
         
         # Save annotated image
-    cv2.imwrite(r'4.png', annotated_image)
+        cv2.imwrite(r'4.png', annotated_image)
         print("Static image processed and saved.")
 
 # ============================================================================
@@ -81,34 +81,34 @@ with mp_pose.Pose(
       # If loading a video, use 'break' instead of 'continue'.
       continue
 
-        # Convert BGR image to RGB (MediaPipe expects RGB)
+    # Convert BGR image to RGB (MediaPipe expects RGB)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # Mark image as not writeable to pass by reference (performance optimization)
+    
+    # Mark image as not writeable to pass by reference (performance optimization)
     image.flags.writeable = False
-        
-        # Process image with MediaPipe pose estimation
+    
+    # Process image with MediaPipe pose estimation
     results = pose.process(image)
 
-        # Mark image as writeable again for drawing
+    # Mark image as writeable again for drawing
     image.flags.writeable = True
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        
-        # Draw pose landmarks and connections on the image
+    
+    # Draw pose landmarks and connections on the image
     mp_drawing.draw_landmarks(
         image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-        
-        # Calculate and display FPS
+    
+    # Calculate and display FPS
     currTime = time.time()
     fps = 1 / (currTime - prevTime)
     prevTime = currTime
-        cv2.putText(image, f'FPS: {int(fps)}', (20, 70), 
-                   cv2.FONT_HERSHEY_PLAIN, 3, (0, 196, 255), 2)
-        
-        # Display the annotated frame
+    cv2.putText(image, f'FPS: {int(fps)}', (20, 70), 
+               cv2.FONT_HERSHEY_PLAIN, 3, (0, 196, 255), 2)
+    
+    # Display the annotated frame
     cv2.imshow('BlazePose', image)
-        
-        # Press ESC (27) to exit
+    
+    # Press ESC (27) to exit
     if cv2.waitKey(5) & 0xFF == 27:
       break
 

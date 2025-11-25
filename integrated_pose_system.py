@@ -25,11 +25,359 @@ import torch
 import numpy as np
 import time
 import argparse
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List
 import os
 
 from inference import PoseInference
 from mediapipe_integration import MediaPipePoseEstimator
+
+
+class PoseClassifier:
+    """
+    Classifies human poses based on keypoint positions and angles.
+    
+    Analyzes the spatial relationships between keypoints to identify
+    common poses and gestures like standing, T-pose, arms raised, etc.
+    """
+    
+    def __init__(self):
+        """Initialize pose classifier with joint indices."""
+        # MPII joint indices for reference
+        self.joint_indices = {
+            'r_ankle': 0, 'r_knee': 1, 'r_hip': 2, 'l_hip': 3, 'l_knee': 4, 'l_ankle': 5,
+            'pelvis': 6, 'thorax': 7, 'upper_neck': 8, 'head_top': 9,
+            'r_wrist': 10, 'r_elbow': 11, 'r_shoulder': 12, 'l_shoulder': 13, 'l_elbow': 14, 'l_wrist': 15
+        }
+    
+    def calculate_angle(self, point1: np.ndarray, point2: np.ndarray, point3: np.ndarray) -> float:
+        """
+        Calculate angle between three points (point2 is the vertex).
+        
+        Args:
+            point1: First point [x, y]
+            point2: Vertex point [x, y]
+            point3: Third point [x, y]
+            
+        Returns:
+            Angle in degrees
+        """
+        # Convert to vectors
+        v1 = point1 - point2
+        v2 = point3 - point2
+        
+        # Calculate angle using dot product
+        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6)
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)
+        angle = np.arccos(cos_angle) * 180 / np.pi
+        return angle
+    
+    def calculate_distance(self, point1: np.ndarray, point2: np.ndarray) -> float:
+        """Calculate Euclidean distance between two points."""
+        return np.linalg.norm(point1 - point2)
+    
+    def is_visible(self, keypoints: np.ndarray, joint_idx: int, threshold: float = 0.2) -> bool:
+        """
+        Check if a joint is visible (confidence > threshold).
+        
+        Lowered threshold from 0.3 to 0.2 to detect more keypoints
+        and allow pose classification with partial visibility.
+        """
+        return keypoints[joint_idx, 2] > threshold
+    
+    def classify_pose(self, keypoints: np.ndarray) -> str:
+        """
+        Classify the pose based on keypoint positions.
+        
+        Args:
+            keypoints: Keypoints array [num_joints, 3] (x, y, confidence)
+                      Can be 16 (MPII) or 33 (MediaPipe) keypoints
+            
+        Returns:
+            Pose name as string
+        """
+        if keypoints is None:
+            return "No Pose Detected"
+        
+        num_keypoints = len(keypoints)
+        if num_keypoints not in [16, 33]:
+            return "No Pose Detected"
+        
+        # Check minimum visibility requirements (lowered for better detection)
+        min_visible_joints = 5 if num_keypoints == 33 else 3
+        visible_count = sum(1 for i in range(num_keypoints) if self.is_visible(keypoints, i))
+        
+        # If we have very few keypoints, still try to classify but show status
+        if visible_count < min_visible_joints:
+            if visible_count == 0:
+                return "No Person Detected"
+            return f"Detecting... ({visible_count}/{num_keypoints} keypoints visible)"
+        
+        # Extract key joint positions (only if visible)
+        def get_point(idx):
+            if idx < num_keypoints and self.is_visible(keypoints, idx):
+                return np.array([keypoints[idx, 0], keypoints[idx, 1]])
+            return None
+        
+        # Map keypoints based on format (16 MPII or 33 MediaPipe)
+        if num_keypoints == 33:
+            # MediaPipe 33 keypoint indices
+            r_shoulder = get_point(12)
+            l_shoulder = get_point(11)
+            r_elbow = get_point(14)
+            l_elbow = get_point(13)
+            r_wrist = get_point(16)
+            l_wrist = get_point(15)
+            r_hip = get_point(24)
+            l_hip = get_point(23)
+            r_knee = get_point(26)
+            l_knee = get_point(25)
+            head = get_point(0)  # nose
+            thorax = None  # Calculate from shoulders
+            
+            # Finger keypoints (MediaPipe 33 keypoints include fingers)
+            r_pinky = get_point(18)
+            l_pinky = get_point(17)
+            r_index = get_point(20)
+            l_index = get_point(19)
+            r_thumb = get_point(22)
+            l_thumb = get_point(21)
+        else:
+            # MPII 16 keypoint indices (legacy)
+            r_shoulder = get_point(12)
+            l_shoulder = get_point(13)
+            r_elbow = get_point(11)
+            l_elbow = get_point(14)
+            r_wrist = get_point(10)
+            l_wrist = get_point(15)
+            r_hip = get_point(2)
+            l_hip = get_point(3)
+            r_knee = get_point(1)
+            l_knee = get_point(4)
+            head = get_point(9)
+            thorax = get_point(7)
+        
+        # Calculate thorax from shoulders if using 33 keypoints
+        if num_keypoints == 33 and r_shoulder is not None and l_shoulder is not None:
+            thorax = np.array([(r_shoulder[0] + l_shoulder[0]) / 2, 
+                             (r_shoulder[1] + l_shoulder[1]) / 2])
+        
+        # Check for T-Pose (arms horizontal, straight)
+        if (r_shoulder is not None and l_shoulder is not None and
+            r_elbow is not None and l_elbow is not None and
+            r_wrist is not None and l_wrist is not None):
+            
+            # Check if arms are horizontal (shoulders and wrists at similar height)
+            shoulder_y = (r_shoulder[1] + l_shoulder[1]) / 2
+            wrist_y_avg = (r_wrist[1] + l_wrist[1]) / 2
+            
+            # Check if arms are extended (elbows and wrists far from shoulders)
+            r_arm_extended = self.calculate_distance(r_shoulder, r_wrist) > self.calculate_distance(r_shoulder, r_elbow) * 1.5
+            l_arm_extended = self.calculate_distance(l_shoulder, l_wrist) > self.calculate_distance(l_shoulder, l_elbow) * 1.5
+            
+            if (abs(shoulder_y - wrist_y_avg) < 50 and r_arm_extended and l_arm_extended):
+                # Add finger details if available
+                finger_info = ""
+                if num_keypoints == 33:
+                    visible_fingers = []
+                    if r_pinky is not None: visible_fingers.append("right pinky")
+                    if l_pinky is not None: visible_fingers.append("left pinky")
+                    if r_index is not None: visible_fingers.append("right index")
+                    if l_index is not None: visible_fingers.append("left index")
+                    if visible_fingers:
+                        finger_info = f" | Fingers visible: {', '.join(visible_fingers)}"
+                return f"T-Pose: Arms extended horizontally, body in cross shape{finger_info}"
+        
+        # Check for Arms Raised (both wrists above shoulders)
+        if (r_shoulder is not None and l_shoulder is not None and
+            r_wrist is not None and l_wrist is not None):
+            
+            shoulder_y_avg = (r_shoulder[1] + l_shoulder[1]) / 2
+            if (r_wrist[1] < shoulder_y_avg - 30 and l_wrist[1] < shoulder_y_avg - 30):
+                # Check if arms are straight up
+                if (r_elbow is not None and l_elbow is not None):
+                    r_angle = self.calculate_angle(r_shoulder, r_elbow, r_wrist)
+                    l_angle = self.calculate_angle(l_shoulder, l_elbow, l_wrist)
+                    if r_angle > 150 and l_angle > 150:
+                        details = ["arms fully extended", "reaching upward"]
+                        if num_keypoints == 33:
+                            if (r_index is not None and r_index[1] < r_wrist[1]) or (l_index is not None and l_index[1] < l_wrist[1]):
+                                details.append("fingers extended")
+                            if r_thumb is not None or l_thumb is not None:
+                                details.append("thumbs visible")
+                        return f"Arms Raised Up: Both arms straight up, reaching for the sky | {', '.join(details)}"
+                # Check finger positions for more detail
+                details = ["hands elevated", "upper body engaged"]
+                if num_keypoints == 33:
+                    if (r_index is not None and r_index[1] < r_wrist[1]) or (l_index is not None and l_index[1] < l_wrist[1]):
+                        details.append("fingers pointing up")
+                    finger_count = sum([r_pinky is not None, l_pinky is not None, 
+                                      r_index is not None, l_index is not None])
+                    if finger_count >= 2:
+                        details.append(f"{finger_count} finger tips visible")
+                return f"Arms Raised: Both hands above shoulders, active upper body | {', '.join(details)}"
+        
+        # Check for Hands on Hips (wrists near hips)
+        if (r_hip is not None and l_hip is not None and
+            r_wrist is not None and l_wrist is not None):
+            
+            r_dist = self.calculate_distance(r_wrist, r_hip)
+            l_dist = self.calculate_distance(l_wrist, l_hip)
+            
+            if r_dist < 80 and l_dist < 80:
+                details = ["confident posture", "ready stance"]
+                if num_keypoints == 33:
+                    if (r_thumb is not None and r_thumb[0] > r_wrist[0]) or (l_thumb is not None and l_thumb[0] < l_wrist[0]):
+                        details.append("thumbs forward")
+                    if r_pinky is not None or l_pinky is not None:
+                        details.append("hands positioned on hips")
+                return f"Hands on Hips: Confident stance, assertive body language | {', '.join(details)}"
+        
+        # Check for One Arm Raised
+        if (r_shoulder is not None and l_shoulder is not None):
+            shoulder_y_avg = (r_shoulder[1] + l_shoulder[1]) / 2
+            
+            if r_wrist is not None and r_wrist[1] < shoulder_y_avg - 30:
+                # Check if it's a wave or just raised
+                if r_elbow is not None:
+                    elbow_angle = self.calculate_angle(r_shoulder, r_elbow, r_wrist)
+                    if 90 < elbow_angle < 150:
+                        details = ["waving motion", "friendly gesture"]
+                        if num_keypoints == 33:
+                            if r_index is not None and r_pinky is not None:
+                                details.append("fingers spread")
+                            if r_thumb is not None:
+                                details.append("thumb visible")
+                        return f"Right Hand Waving: Greeting gesture, friendly interaction | {', '.join(details)}"
+                    elif r_wrist[1] < r_elbow[1]:
+                        details = ["arm extended upward", "reaching high"]
+                        if num_keypoints == 33:
+                            if r_index is not None and r_index[1] < r_wrist[1]:
+                                details.append("index finger pointing up")
+                            if r_pinky is not None:
+                                details.append("hand fully visible")
+                        return f"Right Arm Raised: Hand above head, reaching upward | {', '.join(details)}"
+                details = ["right arm elevated", "signaling"]
+                if num_keypoints == 33:
+                    if r_index is not None:
+                        details.append("index finger detected")
+                    if r_thumb is not None:
+                        details.append("thumb visible")
+                return f"Right Arm Raised: Right hand up, active signaling | {', '.join(details)}"
+            if l_wrist is not None and l_wrist[1] < shoulder_y_avg - 30:
+                # Check if it's a wave or just raised
+                if l_elbow is not None:
+                    elbow_angle = self.calculate_angle(l_shoulder, l_elbow, l_wrist)
+                    if 90 < elbow_angle < 150:
+                        details = ["waving motion", "friendly gesture"]
+                        if num_keypoints == 33:
+                            if l_index is not None and l_pinky is not None:
+                                details.append("fingers spread")
+                            if l_thumb is not None:
+                                details.append("thumb visible")
+                        return f"Left Hand Waving: Greeting gesture, friendly interaction | {', '.join(details)}"
+                    elif l_wrist[1] < l_elbow[1]:
+                        details = ["arm extended upward", "reaching high"]
+                        if num_keypoints == 33:
+                            if l_index is not None and l_index[1] < l_wrist[1]:
+                                details.append("index finger pointing up")
+                            if l_pinky is not None:
+                                details.append("hand fully visible")
+                        return f"Left Arm Raised: Hand above head, reaching upward | {', '.join(details)}"
+                details = ["left arm elevated", "signaling"]
+                if num_keypoints == 33:
+                    if l_index is not None:
+                        details.append("index finger detected")
+                    if l_thumb is not None:
+                        details.append("thumb visible")
+                return f"Left Arm Raised: Left hand up, active signaling | {', '.join(details)}"
+        
+        # Check for Sitting (knees bent, hips lower relative to knees)
+        if (r_hip is not None and l_hip is not None and
+            r_knee is not None and l_knee is not None):
+            
+            hip_y_avg = (r_hip[1] + l_hip[1]) / 2
+            knee_y_avg = (r_knee[1] + l_knee[1]) / 2
+            
+            # If hips are close to knees (bent position)
+            if abs(hip_y_avg - knee_y_avg) < 100:
+                return "Sitting: Knees bent, seated position"
+        
+        # Check for Standing Straight (hips and shoulders aligned vertically)
+        if (thorax is not None and r_hip is not None and l_hip is not None):
+            hip_y_avg = (r_hip[1] + l_hip[1]) / 2
+            if abs(thorax[0] - (r_hip[0] + l_hip[0]) / 2) < 30:
+                return "Standing Straight: Upright posture"
+        
+        # Check for waving with one arm
+        if r_wrist is not None and r_elbow is not None and r_shoulder is not None:
+            r_angle = self.calculate_angle(r_shoulder, r_elbow, r_wrist)
+            if 80 < r_angle < 140 and r_wrist[1] < r_shoulder[1]:
+                return "Right Hand Waving: Greeting gesture"
+        
+        if l_wrist is not None and l_elbow is not None and l_shoulder is not None:
+            l_angle = self.calculate_angle(l_shoulder, l_elbow, l_wrist)
+            if 80 < l_angle < 140 and l_wrist[1] < l_shoulder[1]:
+                return "Left Hand Waving: Greeting gesture"
+        
+        # Check for pointing gesture
+        if r_wrist is not None and r_elbow is not None and r_shoulder is not None:
+            r_angle = self.calculate_angle(r_shoulder, r_elbow, r_wrist)
+            if r_angle > 160 and r_wrist[0] > r_shoulder[0]:
+                details = ["arm extended forward", "directing attention"]
+                if num_keypoints == 33:
+                    if r_index is not None and r_index[0] > r_wrist[0]:
+                        details.append("index finger extended")
+                    if r_thumb is not None:
+                        details.append("thumb visible")
+                return f"Right Hand Pointing: Extended forward, directing attention | {', '.join(details)}"
+        
+        if l_wrist is not None and l_elbow is not None and l_shoulder is not None:
+            l_angle = self.calculate_angle(l_shoulder, l_elbow, l_wrist)
+            if l_angle > 160 and l_wrist[0] < l_shoulder[0]:
+                details = ["arm extended forward", "directing attention"]
+                if num_keypoints == 33:
+                    if l_index is not None and l_index[0] < l_wrist[0]:
+                        details.append("index finger extended")
+                    if l_thumb is not None:
+                        details.append("thumb visible")
+                return f"Left Hand Pointing: Extended forward, directing attention | {', '.join(details)}"
+        
+        # Try to classify with minimal keypoints (at least shoulders and hips)
+        if (r_shoulder is not None or l_shoulder is not None) and (r_hip is not None or l_hip is not None):
+            # Check if arms are down
+            if r_wrist is not None and l_wrist is not None:
+                shoulder_y_avg = ((r_shoulder[1] if r_shoulder is not None else 0) + 
+                                (l_shoulder[1] if l_shoulder is not None else 0)) / 2
+                if r_wrist[1] > shoulder_y_avg + 50 and l_wrist[1] > shoulder_y_avg + 50:
+                    details = ["arms at sides", "relaxed posture"]
+                    if num_keypoints == 33:
+                        finger_count = sum([r_pinky is not None, l_pinky is not None, 
+                                          r_index is not None, l_index is not None,
+                                          r_thumb is not None, l_thumb is not None])
+                        if finger_count > 0:
+                            details.append(f"{finger_count} finger keypoints visible")
+                        if r_thumb is not None or l_thumb is not None:
+                            details.append("thumbs detected")
+                    return f"Standing: Arms at sides, relaxed posture, natural stance | {', '.join(details)}"
+            # Add more context about body position
+            details = ["neutral pose", "balanced position"]
+            if num_keypoints == 33:
+                if head is not None and thorax is not None:
+                    head_angle = np.arctan2(head[1] - thorax[1], head[0] - thorax[0]) * 180 / np.pi
+                    if abs(head_angle) < 20:
+                        details.append("head aligned with body")
+                finger_count = sum([r_pinky is not None, l_pinky is not None, 
+                                  r_index is not None, l_index is not None])
+                if finger_count > 0:
+                    details.append(f"{finger_count} finger tips visible")
+            return f"Standing: Neutral pose, balanced position | {', '.join(details)}"
+        
+        # If we have any keypoints at all, show detecting
+        if visible_count > 0:
+            return f"Detecting Pose... ({visible_count}/{num_keypoints} keypoints)"
+        
+        # Default: Standing
+        return "Standing: Neutral position"
 
 
 class IntegratedPoseSystem:
@@ -51,7 +399,7 @@ class IntegratedPoseSystem:
                  hybrid_mode: bool = False,
                  device: Optional[torch.device] = None,
                  input_size: Tuple[int, int] = (256, 256),
-                 confidence_threshold: float = 0.3):
+                 confidence_threshold: float = 0.2):
         """
         Initialize integrated pose system.
         
@@ -87,11 +435,12 @@ class IntegratedPoseSystem:
         self.mediapipe_model = None
         if use_mediapipe:
             print("Loading MediaPipe pose estimator...")
+            # Lower thresholds for better detection sensitivity
             self.mediapipe_model = MediaPipePoseEstimator(
                 static_image_mode=False,
-                model_complexity=2,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5
+                model_complexity=2,  # Use highest complexity for best accuracy
+                min_detection_confidence=0.3,  # Lowered from 0.5 for better detection
+                min_tracking_confidence=0.3  # Lowered from 0.5 for better tracking
             )
             print("✓ MediaPipe loaded")
         
@@ -100,19 +449,73 @@ class IntegratedPoseSystem:
         self.total_time = 0.0
         self.inference_times = []
         
-        # Joint names and skeleton from dataset
+        # Use 33 MediaPipe keypoints
+        self.use_33_keypoints = True
+        self.num_keypoints = 33
+        
+        # MediaPipe 33 keypoint names
         self.joint_names = [
-            'r_ankle', 'r_knee', 'r_hip', 'l_hip', 'l_knee', 'l_ankle',
-            'pelvis', 'thorax', 'upper_neck', 'head_top',
-            'r_wrist', 'r_elbow', 'r_shoulder', 'l_shoulder', 'l_elbow', 'l_wrist'
+            'nose',  # 0
+            'left_eye_inner', 'left_eye', 'left_eye_outer',  # 1-3
+            'right_eye_inner', 'right_eye', 'right_eye_outer',  # 4-6
+            'left_ear', 'right_ear',  # 7-8
+            'mouth_left', 'mouth_right',  # 9-10
+            'left_shoulder', 'right_shoulder',  # 11-12
+            'left_elbow', 'right_elbow',  # 13-14
+            'left_wrist', 'right_wrist',  # 15-16
+            'left_pinky', 'right_pinky',  # 17-18
+            'left_index', 'right_index',  # 19-20
+            'left_thumb', 'right_thumb',  # 21-22
+            'left_hip', 'right_hip',  # 23-24
+            'left_knee', 'right_knee',  # 25-26
+            'left_ankle', 'right_ankle',  # 27-28
+            'left_heel', 'right_heel',  # 29-30
+            'left_foot_index', 'right_foot_index'  # 31-32
         ]
         
+        # MediaPipe skeleton connections (33 keypoints)
+        # Using MediaPipe's exact POSE_CONNECTIONS structure
+        # This matches the official MediaPipe BlazePose GHUM 3D model
         self.skeleton = [
-            [0, 1], [1, 2], [2, 6], [6, 3], [3, 4], [4, 5],  # legs
-            [6, 7], [7, 8], [8, 9],  # torso and head
-            [7, 12], [12, 11], [11, 10],  # right arm
-            [7, 13], [13, 14], [14, 15]  # left arm
+            [15, 21],  # left wrist to left thumb
+            [16, 20],  # right wrist to right index
+            [18, 20],  # right pinky to right index
+            [3, 7],    # left eye outer to left ear
+            [14, 16],  # right elbow to right wrist
+            [23, 25],  # left hip to left knee
+            [28, 30],  # right ankle to right heel
+            [11, 23],  # left shoulder to left hip
+            [27, 31],  # left ankle to left foot index
+            [6, 8],    # right eye outer to right ear
+            [15, 17],  # left wrist to left pinky
+            [24, 26],  # right hip to right knee
+            [16, 22],  # right wrist to right thumb
+            [4, 5],    # right eye inner to right eye
+            [5, 6],    # right eye to right eye outer
+            [29, 31],  # left heel to left foot index
+            [12, 24],  # right shoulder to right hip
+            [23, 24],  # left hip to right hip
+            [0, 1],    # nose to left eye inner
+            [9, 10],   # mouth left to mouth right
+            [1, 2],    # left eye inner to left eye
+            [0, 4],    # nose to right eye inner
+            [11, 13],  # left shoulder to left elbow
+            [30, 32],  # right heel to right foot index
+            [28, 32],  # right ankle to right foot index
+            [15, 19],  # left wrist to left index
+            [16, 18],  # right wrist to right pinky
+            [25, 27],  # left knee to left ankle
+            [26, 28],  # right knee to right ankle
+            [12, 14],  # right shoulder to right elbow
+            [17, 19],  # left pinky to left index
+            [2, 3],    # left eye to left eye outer
+            [11, 12],  # left shoulder to right shoulder
+            [27, 29],  # left ankle to left heel
+            [13, 15]   # left elbow to left wrist
         ]
+        
+        # Initialize pose classifier
+        self.pose_classifier = PoseClassifier()
     
     def predict_trained_model(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """
@@ -142,79 +545,482 @@ class IntegratedPoseSystem:
             frame: Input frame (BGR)
         
         Returns:
-            Keypoints array [16, 3] (x, y, confidence) or None
+            Keypoints array [16, 3] (x, y, confidence) in image coordinates
         """
         if self.mediapipe_model is None:
             return None
         
         try:
             _, results = self.mediapipe_model.process_image(frame)
+            
+            # Check if pose was detected
             if results.pose_landmarks is None:
                 return None
             
-            keypoints = self.mediapipe_model.extract_keypoints(results, frame.shape[:2])
-            return keypoints
+            # Extract keypoints (already in image coordinates)
+            # Use 33 keypoints instead of 16
+            keypoints = self.mediapipe_model.extract_keypoints(
+                results, 
+                (frame.shape[0], frame.shape[1]),
+                use_33_keypoints=True
+            )
+            
+            # Ensure we have valid keypoints (at least some with visibility > 0.1)
+            if keypoints is not None:
+                # Check if we have any visible keypoints
+                visible_count = np.sum(keypoints[:, 2] > 0.1)
+                if visible_count > 0:
+                    return keypoints
+                else:
+                    # Debug: print what we got
+                    print(f"Debug: MediaPipe detected pose but all keypoints have low visibility")
+                    print(f"Max visibility: {np.max(keypoints[:, 2]):.3f}")
+            
+            return None
         except Exception as e:
             print(f"Error in MediaPipe inference: {e}")
+            import traceback
+            traceback.print_exc()
             return None
+    
+    def _calculate_bbox_iou(self, bbox1: List[int], bbox2: List[int]) -> float:
+        """
+        Calculate Intersection over Union (IoU) of two bounding boxes.
+        
+        Args:
+            bbox1: [x, y, w, h]
+            bbox2: [x, y, w, h]
+        
+        Returns:
+            IoU value between 0 and 1
+        """
+        x1, y1, w1, h1 = bbox1
+        x2, y2, w2, h2 = bbox2
+        
+        # Calculate intersection
+        xi1 = max(x1, x2)
+        yi1 = max(y1, y2)
+        xi2 = min(x1 + w1, x2 + w2)
+        yi2 = min(y1 + h1, y2 + h2)
+        
+        if xi2 <= xi1 or yi2 <= yi1:
+            return 0.0
+        
+        inter_area = (xi2 - xi1) * (yi2 - yi1)
+        box1_area = w1 * h1
+        box2_area = w2 * h2
+        union_area = box1_area + box2_area - inter_area
+        
+        if union_area == 0:
+            return 0.0
+        
+        return inter_area / union_area
+    
+    def _is_duplicate_detection(self, new_bbox: List[int], existing_bboxes: List[List[int]], 
+                                new_center: Tuple[float, float], 
+                                existing_centers: List[Tuple[float, float]]) -> bool:
+        """
+        Check if a new detection is a duplicate of existing detections.
+        
+        Args:
+            new_bbox: New bounding box [x, y, w, h]
+            existing_bboxes: List of existing bounding boxes
+            new_center: Center point of new detection (x, y)
+            existing_centers: List of existing center points
+        
+        Returns:
+            True if duplicate, False if new person
+        """
+        for existing_bbox, existing_center in zip(existing_bboxes, existing_centers):
+            # Check IoU overlap
+            iou = self._calculate_bbox_iou(new_bbox, existing_bbox)
+            if iou > 0.3:  # More than 30% overlap = likely same person
+                return True
+            
+            # Check center distance (more strict)
+            center_dist = np.sqrt((new_center[0] - existing_center[0])**2 + 
+                                 (new_center[1] - existing_center[1])**2)
+            # Use dynamic threshold based on bbox size
+            avg_bbox_size = (new_bbox[2] + new_bbox[3] + existing_bbox[2] + existing_bbox[3]) / 4
+            threshold = max(150, avg_bbox_size * 0.5)  # At least 150px or 50% of average size
+            
+            if center_dist < threshold:
+                return True
+        
+        return False
+    
+    def predict_multiple_people(self, frame: np.ndarray) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Detect multiple people in frame, ensuring only unique people are counted.
+        
+        Args:
+            frame: Input frame (BGR)
+        
+        Returns:
+            List of (keypoints, bbox) tuples for each detected person
+            bbox is [x, y, w, h] bounding box
+        """
+        if self.mediapipe_model is None:
+            return []
+        
+        detected_people = []
+        detected_bboxes = []
+        detected_centers = []
+        
+        try:
+            # Try full frame first
+            _, results = self.mediapipe_model.process_image(frame)
+            if results.pose_landmarks is not None:
+                keypoints = self.mediapipe_model.extract_keypoints(
+                    results, 
+                    (frame.shape[0], frame.shape[1]),
+                    use_33_keypoints=True
+                )
+                if keypoints is not None and np.sum(keypoints[:, 2] > 0.1) > 5:
+                    # Calculate bounding box from keypoints
+                    visible_kpts = keypoints[keypoints[:, 2] > 0.1]
+                    if len(visible_kpts) > 0:
+                        x_min = max(0, int(np.min(visible_kpts[:, 0])))
+                        y_min = max(0, int(np.min(visible_kpts[:, 1])))
+                        x_max = min(frame.shape[1], int(np.max(visible_kpts[:, 0])))
+                        y_max = min(frame.shape[0], int(np.max(visible_kpts[:, 1])))
+                        bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
+                        center = (np.mean(visible_kpts[:, 0]), np.mean(visible_kpts[:, 1]))
+                        
+                        detected_people.append((keypoints, bbox))
+                        detected_bboxes.append(bbox)
+                        detected_centers.append(center)
+            
+            # Only try quadrants if we haven't found multiple people yet
+            # This prevents duplicate detections of the same person
+            if len(detected_people) < 2:
+                h, w = frame.shape[:2]
+                quadrants = [
+                    frame[0:h//2, 0:w//2],  # Top-left
+                    frame[0:h//2, w//2:w],  # Top-right
+                    frame[h//2:h, 0:w//2],  # Bottom-left
+                    frame[h//2:h, w//2:w]   # Bottom-right
+                ]
+                offsets = [
+                    (0, 0),           # Top-left offset
+                    (w//2, 0),         # Top-right offset
+                    (0, h//2),         # Bottom-left offset
+                    (w//2, h//2)       # Bottom-right offset
+                ]
+                
+                for quadrant, (offset_x, offset_y) in zip(quadrants, offsets):
+                    _, results = self.mediapipe_model.process_image(quadrant)
+                    if results.pose_landmarks is not None:
+                        keypoints = self.mediapipe_model.extract_keypoints(
+                            results,
+                            (quadrant.shape[0], quadrant.shape[1]),
+                            use_33_keypoints=True
+                        )
+                        if keypoints is not None and np.sum(keypoints[:, 2] > 0.1) > 5:
+                            # Adjust keypoints to full frame coordinates
+                            keypoints[:, 0] += offset_x
+                            keypoints[:, 1] += offset_y
+                            
+                            # Calculate bounding box and center
+                            visible_kpts = keypoints[keypoints[:, 2] > 0.1]
+                            if len(visible_kpts) > 0:
+                                x_min = max(0, int(np.min(visible_kpts[:, 0])))
+                                y_min = max(0, int(np.min(visible_kpts[:, 1])))
+                                x_max = min(frame.shape[1], int(np.max(visible_kpts[:, 0])))
+                                y_max = min(frame.shape[0], int(np.max(visible_kpts[:, 1])))
+                                bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
+                                center = (np.mean(visible_kpts[:, 0]), np.mean(visible_kpts[:, 1]))
+                                
+                                # Check if this is a new person (not duplicate)
+                                if not self._is_duplicate_detection(bbox, detected_bboxes, center, detected_centers):
+                                    detected_people.append((keypoints, bbox))
+                                    detected_bboxes.append(bbox)
+                                    detected_centers.append(center)
+                                    
+                                    # Stop if we found enough people
+                                    if len(detected_people) >= 5:
+                                        break
+            
+            return detected_people
+            
+        except Exception as e:
+            print(f"Error in multi-person detection: {e}")
+            return detected_people
     
     def visualize_pose(self,
                       frame: np.ndarray,
                       keypoints: np.ndarray,
                       label: str = "Pose",
-                      color: Tuple[int, int, int] = (0, 255, 0)) -> np.ndarray:
+                      color: Tuple[int, int, int] = None,
+                      skeleton_color: Tuple[int, int, int] = None,
+                      keypoint_color: Tuple[int, int, int] = None,
+                      show_pose_name: bool = True,
+                      keypoints_already_scaled: bool = False) -> np.ndarray:
         """
-        Draw skeleton on frame.
+        Draw skeleton on frame with pose classification.
         
         Args:
             frame: Input frame
             keypoints: Keypoints array [num_joints, 3]
             label: Label to display (e.g., "Trained" or "MediaPipe")
-            color: Color for skeleton (BGR)
+            color: Color for both skeleton and keypoints (BGR) - deprecated, use skeleton_color/keypoint_color
+            skeleton_color: Color for skeleton lines (BGR) - default: teal/cyan (0, 255, 255)
+            keypoint_color: Color for keypoint circles (BGR) - default: pink (203, 192, 255)
+            show_pose_name: Whether to display classified pose name
+            keypoints_already_scaled: If True, keypoints are already in image coordinates
         
         Returns:
-            Frame with skeleton drawn
+            Frame with skeleton drawn and pose labeled
         """
         vis_frame = frame.copy()
         
-        # Scale keypoints to image size
-        scale_x = frame.shape[1] / self.input_size[1]
-        scale_y = frame.shape[0] / self.input_size[0]
+        # Set default colors to match reference image (pink keypoints, teal skeleton)
+        if skeleton_color is None:
+            skeleton_color = color if color is not None else (0, 255, 255)  # Teal/Cyan
+        if keypoint_color is None:
+            keypoint_color = color if color is not None else (203, 192, 255)  # Pink
         
-        scaled_keypoints = keypoints.copy()
-        scaled_keypoints[:, 0] *= scale_x
-        scaled_keypoints[:, 1] *= scale_y
+        # Scale keypoints to image size (if needed)
+        if keypoints_already_scaled:
+            scaled_keypoints = keypoints.copy()
+        else:
+            scale_x = frame.shape[1] / self.input_size[1]
+            scale_y = frame.shape[0] / self.input_size[0]
+            
+            scaled_keypoints = keypoints.copy()
+            scaled_keypoints[:, 0] *= scale_x
+            scaled_keypoints[:, 1] *= scale_y
         
-        # Draw skeleton connections
+        # Classify the pose
+        pose_name = "Unknown"
+        if show_pose_name:
+            pose_name = self.pose_classifier.classify_pose(scaled_keypoints)
+        
+        # Draw skeleton connections (thicker lines for better visibility)
+        # Use lower threshold for drawing to show more connections
+        draw_threshold = max(0.15, self.confidence_threshold * 0.7)
         for connection in self.skeleton:
             start_joint = connection[0]
             end_joint = connection[1]
             
-            if (scaled_keypoints[start_joint, 2] > self.confidence_threshold and
-                scaled_keypoints[end_joint, 2] > self.confidence_threshold):
+            if (scaled_keypoints[start_joint, 2] > draw_threshold and
+                scaled_keypoints[end_joint, 2] > draw_threshold):
                 
                 start_point = (int(scaled_keypoints[start_joint, 0]),
                              int(scaled_keypoints[start_joint, 1]))
                 end_point = (int(scaled_keypoints[end_joint, 0]),
                            int(scaled_keypoints[end_joint, 1]))
                 
-                cv2.line(vis_frame, start_point, end_point, color, 2)
+                # Draw thicker lines for better visibility (teal/cyan skeleton)
+                cv2.line(vis_frame, start_point, end_point, skeleton_color, 3)
         
-        # Draw joints
+        # Draw joints (larger circles for better visibility)
+        # Use lower threshold for drawing to show more keypoints
+        draw_threshold = max(0.15, self.confidence_threshold * 0.7)
+        num_kpts = len(scaled_keypoints)
+        
         for i, (x, y, conf) in enumerate(scaled_keypoints):
-            if conf > self.confidence_threshold:
-                cv2.circle(vis_frame, (int(x), int(y)), 4, color, -1)
-                cv2.putText(vis_frame, str(i), (int(x) + 5, int(y) - 5),
-                           cv2.FONT_HERSHEY_SMALL, 0.4, (255, 255, 255), 1)
+            if conf > draw_threshold:
+                # Check if this is a finger keypoint (MediaPipe 33 keypoints)
+                is_finger = False
+                if num_kpts == 33:
+                    # MediaPipe finger indices: 17-22 (pinky, index, thumb)
+                    finger_indices = [17, 18, 19, 20, 21, 22]
+                    is_finger = i in finger_indices
+                
+                # Make finger keypoints slightly larger and more visible
+                if is_finger:
+                    circle_size = int(5 + conf * 3)  # Larger for fingers
+                    # Use slightly different color for fingers (brighter pink)
+                    finger_color = (min(255, keypoint_color[0] + 30), 
+                                  min(255, keypoint_color[1] + 20), 
+                                  min(255, keypoint_color[2] + 10))
+                    cv2.circle(vis_frame, (int(x), int(y)), circle_size, finger_color, -1)
+                    cv2.circle(vis_frame, (int(x), int(y)), circle_size, (255, 255, 0), 2)  # Yellow outline for fingers
+                else:
+                    # Regular keypoints
+                    circle_size = int(4 + conf * 2)
+                    cv2.circle(vis_frame, (int(x), int(y)), circle_size, keypoint_color, -1)
+                    cv2.circle(vis_frame, (int(x), int(y)), circle_size, (255, 255, 255), 1)  # White outline
+        
+        # Display pose name prominently at the top
+        if show_pose_name and pose_name:
+            # Use white text color for better visibility
+            text_color = (255, 255, 255)  # White text
+            border_color = (0, 255, 255)  # Teal border to match skeleton
+            
+            # Get text size for proper positioning
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 1.0
+            thickness = 2
+            text_size = cv2.getTextSize(pose_name, font, font_scale, thickness)[0]
+            text_x = (frame.shape[1] - text_size[0]) // 2
+            text_y = 50
+            
+            # Draw background rectangle with padding
+            padding = 15
+            cv2.rectangle(vis_frame, 
+                         (text_x - padding, text_y - text_size[1] - padding),
+                         (text_x + text_size[0] + padding, text_y + padding),
+                         (0, 0, 0), -1)  # Black background
+            cv2.rectangle(vis_frame,
+                         (text_x - padding, text_y - text_size[1] - padding),
+                         (text_x + text_size[0] + padding, text_y + padding),
+                         border_color, 2)  # Teal border
+            
+            # Draw pose name text with white color
+            cv2.putText(vis_frame, pose_name, (text_x, text_y),
+                       font, font_scale, text_color, thickness, cv2.LINE_AA)
         
         return vis_frame
     
-    def process_webcam(self, camera_index: int = 0) -> None:
+    def draw_side_panel(self, frame: np.ndarray, people_data: List[Tuple[int, str, np.ndarray]]) -> np.ndarray:
+        """
+        Draw chatbot-style side panel showing pose descriptions.
+        
+        Args:
+            frame: Input frame
+            people_data: List of (person_id, pose_name, keypoints) tuples
+        
+        Returns:
+            Frame with chatbot-style side panel drawn
+        """
+        vis_frame = frame.copy()
+        h, w = frame.shape[:2]
+        
+        # Chatbot-style panel dimensions - wider and taller
+        panel_width = 400
+        panel_height = h - 20  # Full height
+        panel_x = w - panel_width - 10
+        panel_y = 10
+        
+        # Draw panel background (chatbot style - darker)
+        cv2.rectangle(vis_frame, 
+                     (panel_x, panel_y),
+                     (panel_x + panel_width, panel_y + panel_height),
+                     (25, 25, 35), -1)  # Dark blue-gray background
+        cv2.rectangle(vis_frame,
+                     (panel_x, panel_y),
+                     (panel_x + panel_width, panel_y + panel_height),
+                     (0, 255, 255), 2)  # Teal border
+        
+        # Panel header (chatbot style)
+        header_height = 40
+        cv2.rectangle(vis_frame,
+                     (panel_x, panel_y),
+                     (panel_x + panel_width, panel_y + header_height),
+                     (40, 40, 50), -1)  # Slightly lighter header
+        cv2.line(vis_frame,
+                (panel_x, panel_y + header_height),
+                (panel_x + panel_width, panel_y + header_height),
+                (0, 255, 255), 2)
+        
+        # Panel title
+        title = "Pose Analysis"
+        title_size = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        title_x = panel_x + (panel_width - title_size[0]) // 2
+        cv2.putText(vis_frame, title, (title_x, panel_y + 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Chatbot message area (scrollable-like appearance)
+        chat_start_y = panel_y + header_height + 10
+        chat_area_height = panel_height - header_height - 20
+        
+        # Draw person information in chatbot message bubbles
+        y_offset = chat_start_y
+        line_spacing = 18  # Smaller spacing for more text
+        
+        for person_id, pose_name, keypoints in people_data:
+            # Person label (smaller, chatbot style)
+            person_label = f"Person {person_id + 1}:"
+            cv2.putText(vis_frame, person_label, (panel_x + 15, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+            y_offset += line_spacing
+            
+            # Split pose description into words for wrapping
+            words = pose_name.split()
+            max_width = panel_width - 40  # Leave margins
+            font_scale = 0.4  # Smaller font for chatbot style
+            font_thickness = 1
+            
+            # Wrap text into multiple lines
+            lines = []
+            current_line = ""
+            for word in words:
+                test_line = current_line + (" " if current_line else "") + word
+                test_size = cv2.getTextSize(test_line, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
+                if test_size[0] > max_width and current_line:
+                    lines.append(current_line)
+                    current_line = word
+                else:
+                    current_line = test_line
+            if current_line:
+                lines.append(current_line)
+            
+            # Draw each line in a message bubble style
+            for line in lines:
+                # Calculate text size
+                text_size = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
+                
+                # Draw message bubble background (chatbot style)
+                bubble_padding = 8
+                bubble_x = panel_x + 15
+                bubble_y = y_offset - text_size[1] - 5
+                bubble_w = text_size[0] + bubble_padding * 2
+                bubble_h = text_size[1] + bubble_padding * 2
+                
+                # Rounded rectangle effect (using filled rectangle)
+                cv2.rectangle(vis_frame,
+                             (bubble_x, bubble_y),
+                             (bubble_x + bubble_w, bubble_y + bubble_h),
+                             (50, 50, 60), -1)  # Dark gray bubble
+                cv2.rectangle(vis_frame,
+                             (bubble_x, bubble_y),
+                             (bubble_x + bubble_w, bubble_y + bubble_h),
+                             (100, 100, 120), 1)  # Light border
+                
+                # Draw text
+                cv2.putText(vis_frame, line, 
+                           (bubble_x + bubble_padding, bubble_y + text_size[1] + bubble_padding - 2),
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, (220, 220, 240), font_thickness)
+                
+                y_offset += bubble_h + 5
+            
+            # Keypoint info (smaller, compact)
+            if keypoints is not None:
+                visible_count = np.sum(keypoints[:, 2] > 0.1)
+                avg_confidence = np.mean(keypoints[keypoints[:, 2] > 0.1, 2]) if visible_count > 0 else 0
+                kpt_text = f"Keypoints: {visible_count}/33 | Confidence: {avg_confidence:.0%}"
+                
+                # Draw in smaller bubble
+                kpt_size = cv2.getTextSize(kpt_text, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)[0]
+                cv2.rectangle(vis_frame,
+                             (panel_x + 15, y_offset - 2),
+                             (panel_x + 15 + kpt_size[0] + 10, y_offset + kpt_size[1] + 4),
+                             (30, 30, 40), -1)
+                cv2.putText(vis_frame, kpt_text, (panel_x + 20, y_offset + kpt_size[1]),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 200), 1)
+                y_offset += kpt_size[1] + 15
+            else:
+                y_offset += 10
+            
+            # Add separator between people (if multiple)
+            if person_id < len(people_data) - 1:
+                cv2.line(vis_frame, 
+                        (panel_x + 20, y_offset + 5),
+                        (panel_x + panel_width - 20, y_offset + 5),
+                        (60, 60, 70), 1)
+                y_offset += 15
+        
+        return vis_frame
+    
+    def process_webcam(self, camera_index: int = 0, multi_person: bool = True) -> None:
         """
         Process webcam feed with pose estimation.
         
         Args:
             camera_index: Webcam index (default: 0)
+            multi_person: If True, detect multiple people; if False, single person mode
         
         Controls:
             q: quit
@@ -241,11 +1047,17 @@ class IntegratedPoseSystem:
         else:
             print("✗ MediaPipe: Not loaded")
         
+        print(f"\nMulti-person mode: {'ON' if multi_person else 'OFF'}")
         print("\nControls:")
         print("  q: Quit")
         print("  s: Save frame")
         if self.hybrid_mode:
             print("  m: Toggle method")
+        print("\nTips for better detection:")
+        print("  - Stand 3-6 feet from camera")
+        print("  - Ensure good lighting")
+        print("  - Face the camera directly")
+        print("  - Keep your full body in frame")
         print("=" * 60)
         
         show_trained = True  # For hybrid mode toggle
@@ -261,44 +1073,120 @@ class IntegratedPoseSystem:
             frame_count += 1
             inference_start = time.time()
             
-            # Get predictions
-            trained_kpts = None
-            mediapipe_kpts = None
-            
-            if self.hybrid_mode:
-                if show_trained and self.trained_model:
-                    trained_kpts = self.predict_trained_model(frame)
-                if not show_trained and self.mediapipe_model:
-                    mediapipe_kpts = self.predict_mediapipe(frame)
+            # Multi-person detection
+            if multi_person and self.mediapipe_model:
+                detected_people = self.predict_multiple_people(frame)
+                vis_frame = frame.copy()
+                people_data = []
+                
+                # Different colors for different people
+                person_colors = [
+                    ((0, 255, 255), (203, 192, 255)),  # Person 1: Teal/Pink
+                    ((0, 255, 0), (255, 192, 203)),    # Person 2: Green/Pink
+                    ((255, 0, 255), (192, 203, 255)),  # Person 3: Magenta/Blue
+                    ((255, 255, 0), (203, 255, 192)),  # Person 4: Yellow/Green
+                    ((0, 165, 255), (255, 203, 192)),  # Person 5: Orange/Peach
+                ]
+                
+                # Process each detected person
+                for person_id, (keypoints, bbox) in enumerate(detected_people):
+                    if person_id >= len(person_colors):
+                        break
+                    
+                    # Classify pose for this person with detailed description
+                    pose_name = self.pose_classifier.classify_pose(keypoints)
+                    
+                    # Get colors for this person
+                    skeleton_color, keypoint_color = person_colors[person_id]
+                    
+                    # Visualize this person's pose
+                    vis_frame = self.visualize_pose(
+                        vis_frame, keypoints, f"Person {person_id + 1}",
+                        skeleton_color=skeleton_color,
+                        keypoint_color=keypoint_color,
+                        show_pose_name=False,  # Don't show pose name on person (will show in panel)
+                        keypoints_already_scaled=True
+                    )
+                    
+                    # Draw bounding box with person label
+                    x, y, w, h = bbox
+                    cv2.rectangle(vis_frame, (x, y), (x + w, y + h), skeleton_color, 3)
+                    label = f"Person {person_id + 1}"
+                    label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+                    cv2.rectangle(vis_frame, (x, y - label_size[1] - 15),
+                                 (x + label_size[0] + 15, y), skeleton_color, -1)
+                    cv2.putText(vis_frame, label, (x + 8, y - 8),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                    
+                    # Store data for side panel with pose description
+                    people_data.append((person_id, pose_name, keypoints))
+                
+                # Draw side panel with detailed pose information for all people
+                if len(people_data) > 0:
+                    vis_frame = self.draw_side_panel(vis_frame, people_data)
+                
             else:
-                if self.trained_model:
-                    trained_kpts = self.predict_trained_model(frame)
-                elif self.mediapipe_model:
-                    mediapipe_kpts = self.predict_mediapipe(frame)
+                # Single person mode (original behavior)
+                trained_kpts = None
+                mediapipe_kpts = None
+                
+                if self.hybrid_mode:
+                    if show_trained and self.trained_model:
+                        trained_kpts = self.predict_trained_model(frame)
+                    if not show_trained and self.mediapipe_model:
+                        mediapipe_kpts = self.predict_mediapipe(frame)
+                else:
+                    if self.trained_model:
+                        trained_kpts = self.predict_trained_model(frame)
+                    elif self.mediapipe_model:
+                        mediapipe_kpts = self.predict_mediapipe(frame)
+                
+                inference_time = time.time() - inference_start
+                self.inference_times.append(inference_time)
+                
+                # Visualize with pose classification
+                vis_frame = frame.copy()
+                
+                # Use whichever keypoints are available
+                keypoints_to_use = None
+                people_data = []
+                
+                if trained_kpts is not None:
+                    keypoints_to_use = trained_kpts
+                    pose_name = self.pose_classifier.classify_pose(trained_kpts)
+                    vis_frame = self.visualize_pose(vis_frame, trained_kpts, "Trained", 
+                                                   skeleton_color=(0, 255, 255),
+                                                   keypoint_color=(203, 192, 255),
+                                                   show_pose_name=False, keypoints_already_scaled=False)
+                    people_data.append((0, pose_name, trained_kpts))
+                elif mediapipe_kpts is not None:
+                    keypoints_to_use = mediapipe_kpts
+                    pose_name = self.pose_classifier.classify_pose(mediapipe_kpts)
+                    vis_frame = self.visualize_pose(vis_frame, mediapipe_kpts, "MediaPipe", 
+                                                   skeleton_color=(0, 255, 255),
+                                                   keypoint_color=(203, 192, 255),
+                                                   show_pose_name=False, keypoints_already_scaled=True)
+                    people_data.append((0, pose_name, mediapipe_kpts))
+                
+                # Draw chatbot-style side panel for single person
+                if len(people_data) > 0:
+                    vis_frame = self.draw_side_panel(vis_frame, people_data)
             
             inference_time = time.time() - inference_start
             self.inference_times.append(inference_time)
-            
-            # Visualize
-            vis_frame = frame.copy()
-            
-            if trained_kpts is not None:
-                vis_frame = self.visualize_pose(vis_frame, trained_kpts, "Trained", (0, 255, 0))
-            
-            if mediapipe_kpts is not None:
-                vis_frame = self.visualize_pose(vis_frame, mediapipe_kpts, "MediaPipe", (255, 0, 0))
             
             # Add metrics
             if frame_count % 30 == 0:
                 elapsed = time.time() - start_time
                 fps = frame_count / elapsed
             
+            # Display FPS and performance metrics
             cv2.putText(vis_frame, f'FPS: {fps:.1f}', (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             cv2.putText(vis_frame, f'Inference: {inference_time*1000:.1f}ms', (10, 70),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
             
-            if self.hybrid_mode:
+            if self.hybrid_mode and not multi_person:
                 method = "Trained" if show_trained else "MediaPipe"
                 cv2.putText(vis_frame, f'Method: {method} (press m to toggle)', (10, 110),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 1)
@@ -338,14 +1226,16 @@ def main():
     parser.add_argument('--model_type', type=str, default='simplebaseline',
                        choices=['hrnet', 'simplebaseline'],
                        help='Type of trained model')
-    parser.add_argument('--camera', type=int, default=0,
-                       help='Camera index (default: 0)')
     parser.add_argument('--use_mediapipe', action='store_true', default=True,
                        help='Use MediaPipe for pose estimation')
     parser.add_argument('--hybrid', action='store_true',
                        help='Compare trained model vs MediaPipe (requires --model_path)')
-    parser.add_argument('--confidence', type=float, default=0.3,
-                       help='Confidence threshold for visualization')
+    parser.add_argument('--confidence', type=float, default=0.2,
+                       help='Confidence threshold for visualization (lower = more keypoints shown)')
+    parser.add_argument('--multi_person', action='store_true', default=False,
+                       help='Enable multi-person detection')
+    parser.add_argument('--single_person', action='store_true', default=True,
+                       help='Use single person mode (default: True)')
     parser.add_argument('--device', type=str, default='auto',
                        choices=['auto', 'cpu', 'cuda'],
                        help='Device to run inference on')
@@ -370,8 +1260,11 @@ def main():
         confidence_threshold=args.confidence
     )
     
-    # Run webcam processing
-    system.process_webcam(camera_index=args.camera)
+    # Determine multi-person mode (default to single person)
+    multi_person = args.multi_person
+    
+    # Run webcam processing (always use camera 0)
+    system.process_webcam(camera_index=0, multi_person=multi_person)
 
 
 if __name__ == '__main__':

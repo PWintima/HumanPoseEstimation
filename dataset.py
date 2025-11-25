@@ -369,14 +369,14 @@ def create_data_loaders(images_dir: str,
     else:
         # Split dataset
         train_size = int(train_split * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size]
-    )
-    
-    # Update training flag for validation dataset
-    val_dataset.dataset.is_training = False
+        val_size = len(full_dataset) - train_size
+        
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, val_size]
+        )
+        
+        # Update training flag for validation dataset
+        val_dataset.dataset.is_training = False
     
     # Create data loaders
     train_loader = DataLoader(
