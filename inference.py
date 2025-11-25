@@ -303,14 +303,14 @@ class PoseInference:
         
         print(f"Video processing completed. Output saved to: {output_path}")
     
-    def process_webcam(self, confidence_threshold: float = 0.3) -> None:
+    def process_webcam(self, confidence_threshold: float = 0.3, camera_index: int = 0) -> None:
         """
         Process webcam feed for real-time pose estimation
         
         Args:
             confidence_threshold: Minimum confidence for drawing
         """
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(camera_index)
         
         if not cap.isOpened():
             print("Error: Could not open webcam")
