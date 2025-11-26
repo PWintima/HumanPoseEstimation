@@ -32,6 +32,341 @@ from inference import PoseInference
 from mediapipe_integration import MediaPipePoseEstimator
 
 
+class MovementTracker:
+    """
+    Tracks movement direction, speed, and velocity of body parts.
+    """
+    
+    def __init__(self, history_size: int = 5):
+        """Initialize movement tracker."""
+        self.history_size = history_size
+        self.position_history = []  # List of keypoint positions over time
+        
+    def add_frame(self, keypoints: np.ndarray):
+        """Add current frame positions."""
+        if keypoints is not None:
+            self.position_history.append(keypoints.copy())
+            if len(self.position_history) > self.history_size:
+                self.position_history.pop(0)
+    
+    def get_movement_velocity(self, joint_idx: int) -> Tuple[float, float]:
+        """
+        Calculate movement velocity for a specific joint.
+        
+        Returns:
+            (velocity_x, velocity_y) in pixels per frame
+        """
+        if len(self.position_history) < 2:
+            return (0.0, 0.0)
+        
+        current = self.position_history[-1]
+        previous = self.position_history[-2]
+        
+        if (current[joint_idx, 2] > 0.1 and previous[joint_idx, 2] > 0.1):
+            vel_x = current[joint_idx, 0] - previous[joint_idx, 0]
+            vel_y = current[joint_idx, 1] - previous[joint_idx, 1]
+            return (vel_x, vel_y)
+        
+        return (0.0, 0.0)
+    
+    def get_movement_direction(self, joint_idx: int) -> str:
+        """Get movement direction for a joint (up, down, left, right, still)."""
+        vel_x, vel_y = self.get_movement_velocity(joint_idx)
+        speed = np.sqrt(vel_x**2 + vel_y**2)
+        
+        if speed < 5:  # Threshold for "still"
+            return "still"
+        
+        # Determine primary direction
+        if abs(vel_y) > abs(vel_x):
+            return "up" if vel_y < 0 else "down"
+        else:
+            return "right" if vel_x > 0 else "left"
+    
+    def get_movement_speed(self, joint_idx: int) -> float:
+        """Get movement speed in pixels per frame."""
+        vel_x, vel_y = self.get_movement_velocity(joint_idx)
+        return np.sqrt(vel_x**2 + vel_y**2)
+
+
+class PoseQualityAnalyzer:
+    """
+    Analyzes pose quality and provides detailed feedback.
+    """
+    
+    def __init__(self):
+        """Initialize pose quality analyzer."""
+        pass
+    
+    def analyze_body_alignment(self, keypoints: np.ndarray, num_keypoints: int) -> Dict[str, str]:
+        """
+        Analyze body alignment and posture quality.
+        
+        Returns:
+            Dictionary with alignment feedback
+        """
+        feedback = {}
+        
+        def get_point(idx):
+            if idx < num_keypoints and keypoints[idx, 2] > 0.2:
+                return np.array([keypoints[idx, 0], keypoints[idx, 1]])
+            return None
+        
+        if num_keypoints == 33:
+            r_shoulder = get_point(12)
+            l_shoulder = get_point(11)
+            r_hip = get_point(24)
+            l_hip = get_point(23)
+            head = get_point(0)
+        else:
+            r_shoulder = get_point(12)
+            l_shoulder = get_point(13)
+            r_hip = get_point(2)
+            l_hip = get_point(3)
+            head = get_point(9)
+        
+        # Check shoulder alignment
+        if r_shoulder is not None and l_shoulder is not None:
+            shoulder_diff = abs(r_shoulder[1] - l_shoulder[1])
+            if shoulder_diff > 20:
+                feedback['shoulders'] = f"Shoulders uneven (difference: {shoulder_diff:.0f}px)"
+            else:
+                feedback['shoulders'] = "Shoulders aligned ✓"
+        
+        # Check hip alignment
+        if r_hip is not None and l_hip is not None:
+            hip_diff = abs(r_hip[1] - l_hip[1])
+            if hip_diff > 15:
+                feedback['hips'] = f"Hips uneven (difference: {hip_diff:.0f}px)"
+            else:
+                feedback['hips'] = "Hips aligned ✓"
+        
+        # Check body vertical alignment
+        if (r_shoulder is not None and l_shoulder is not None and
+            r_hip is not None and l_hip is not None):
+            shoulder_center = (r_shoulder[0] + l_shoulder[0]) / 2
+            hip_center = (r_hip[0] + l_hip[0]) / 2
+            alignment_diff = abs(shoulder_center - hip_center)
+            
+            if alignment_diff > 30:
+                feedback['body'] = f"Body leaning (offset: {alignment_diff:.0f}px)"
+            else:
+                feedback['body'] = "Body vertically aligned ✓"
+        
+        # Check head position
+        if head is not None and r_shoulder is not None and l_shoulder is not None:
+            shoulder_center_y = (r_shoulder[1] + l_shoulder[1]) / 2
+            head_offset = head[1] - shoulder_center_y
+            
+            if head_offset < -50:
+                feedback['head'] = "Head positioned well above shoulders ✓"
+            elif head_offset > 30:
+                feedback['head'] = "Head slightly low"
+            else:
+                feedback['head'] = "Head position good ✓"
+        
+        return feedback
+    
+    def get_detailed_body_description(self, keypoints: np.ndarray, num_keypoints: int) -> List[str]:
+        """
+        Get detailed description of body part positions.
+        
+        Returns:
+            List of detailed descriptions
+        """
+        details = []
+        
+        def get_point(idx):
+            if idx < num_keypoints and keypoints[idx, 2] > 0.2:
+                return np.array([keypoints[idx, 0], keypoints[idx, 1]])
+            return None
+        
+        if num_keypoints == 33:
+            r_shoulder = get_point(12)
+            l_shoulder = get_point(11)
+            r_elbow = get_point(14)
+            l_elbow = get_point(13)
+            r_wrist = get_point(16)
+            l_wrist = get_point(15)
+            r_hip = get_point(24)
+            l_hip = get_point(23)
+            r_knee = get_point(26)
+            l_knee = get_point(25)
+            head = get_point(0)
+        else:
+            r_shoulder = get_point(12)
+            l_shoulder = get_point(13)
+            r_elbow = get_point(11)
+            l_elbow = get_point(14)
+            r_wrist = get_point(10)
+            l_wrist = get_point(15)
+            r_hip = get_point(2)
+            l_hip = get_point(3)
+            r_knee = get_point(1)
+            l_knee = get_point(4)
+            head = get_point(9)
+        
+        # Arm positions
+        if r_shoulder is not None and r_wrist is not None:
+            if r_wrist[1] < r_shoulder[1] - 30:
+                details.append("Right arm: raised above shoulder")
+            elif r_wrist[1] > r_shoulder[1] + 50:
+                details.append("Right arm: hanging down")
+            else:
+                details.append("Right arm: at shoulder level")
+        
+        if l_shoulder is not None and l_wrist is not None:
+            if l_wrist[1] < l_shoulder[1] - 30:
+                details.append("Left arm: raised above shoulder")
+            elif l_wrist[1] > l_shoulder[1] + 50:
+                details.append("Left arm: hanging down")
+            else:
+                details.append("Left arm: at shoulder level")
+        
+        # Leg positions
+        if r_hip is not None and r_knee is not None:
+            if r_knee[1] > r_hip[1] + 80:
+                details.append("Right leg: extended")
+            elif abs(r_knee[1] - r_hip[1]) < 60:
+                details.append("Right leg: bent (sitting/squatting)")
+            else:
+                details.append("Right leg: normal standing")
+        
+        if l_hip is not None and l_knee is not None:
+            if l_knee[1] > l_hip[1] + 80:
+                details.append("Left leg: extended")
+            elif abs(l_knee[1] - l_hip[1]) < 60:
+                details.append("Left leg: bent (sitting/squatting)")
+            else:
+                details.append("Left leg: normal standing")
+        
+        return details
+
+
+class PoseHistoryTracker:
+    """
+    Tracks pose history over time for temporal smoothing and activity recognition.
+    """
+    
+    def __init__(self, history_size: int = 10, smoothing_alpha: float = 0.7):
+        """
+        Initialize pose history tracker.
+        
+        Args:
+            history_size: Number of frames to keep in history
+            smoothing_alpha: Exponential smoothing factor (0-1, higher = more smoothing)
+        """
+        self.history_size = history_size
+        self.smoothing_alpha = smoothing_alpha
+        self.pose_history = []  # List of pose names
+        self.keypoint_history = []  # List of keypoint arrays
+        self.confidence_history = []  # List of confidence scores
+        self.movement_tracker = MovementTracker(history_size=5)
+        self.quality_analyzer = PoseQualityAnalyzer()
+        
+    def add_frame(self, pose_name: str, keypoints: np.ndarray, confidence: float):
+        """Add a new frame to history."""
+        self.pose_history.append(pose_name)
+        self.keypoint_history.append(keypoints.copy() if keypoints is not None else None)
+        self.confidence_history.append(confidence)
+        
+        # Track movement
+        if keypoints is not None:
+            self.movement_tracker.add_frame(keypoints)
+        
+        # Keep only recent history
+        if len(self.pose_history) > self.history_size:
+            self.pose_history.pop(0)
+            self.keypoint_history.pop(0)
+            self.confidence_history.pop(0)
+    
+    def get_smoothed_pose(self) -> str:
+        """Get the most common pose in recent history."""
+        if not self.pose_history:
+            return "No Pose Detected"
+        
+        # Count pose occurrences in recent history
+        recent_poses = self.pose_history[-5:] if len(self.pose_history) >= 5 else self.pose_history
+        pose_counts = {}
+        for pose in recent_poses:
+            # Extract base pose name (remove details)
+            base_pose = pose.split(',')[0] if ',' in pose else pose
+            base_pose = base_pose.split('with')[0].strip() if 'with' in base_pose else base_pose
+            pose_counts[base_pose] = pose_counts.get(base_pose, 0) + 1
+        
+        # Return most common pose
+        if pose_counts:
+            return max(pose_counts, key=pose_counts.get)
+        return self.pose_history[-1]
+    
+    def smooth_keypoints(self, current_keypoints: np.ndarray) -> np.ndarray:
+        """Apply exponential moving average to keypoints."""
+        if current_keypoints is None:
+            return None
+        
+        if not self.keypoint_history or self.keypoint_history[-1] is None:
+            return current_keypoints
+        
+        # Get last smoothed keypoints
+        last_keypoints = self.keypoint_history[-1]
+        
+        # Apply exponential smoothing
+        smoothed = (self.smoothing_alpha * last_keypoints + 
+                   (1 - self.smoothing_alpha) * current_keypoints)
+        
+        return smoothed
+    
+    def detect_activity(self) -> str:
+        """Detect activity based on pose sequence."""
+        if len(self.pose_history) < 3:
+            return None
+        
+        recent_poses = self.pose_history[-5:]
+        
+        # Detect jumping (rapid up/down movement)
+        if len(recent_poses) >= 3:
+            up_poses = sum(1 for p in recent_poses if 'raising' in p.lower() or 'arms' in p.lower())
+            down_poses = sum(1 for p in recent_poses if 'standing' in p.lower() or 'neutral' in p.lower())
+            if up_poses >= 2 and down_poses >= 1:
+                return "Jumping detected"
+        
+        # Detect dancing (rapid pose changes)
+        unique_poses = len(set(recent_poses))
+        if unique_poses >= 4:
+            return "Dancing detected"
+        
+        return None
+    
+    def get_average_confidence(self) -> float:
+        """Get average confidence over recent history."""
+        if not self.confidence_history:
+            return 0.0
+        recent = self.confidence_history[-5:] if len(self.confidence_history) >= 5 else self.confidence_history
+        return np.mean(recent)
+    
+    def get_movement_info(self, joint_idx: int) -> Dict[str, any]:
+        """Get movement information for a joint."""
+        direction = self.movement_tracker.get_movement_direction(joint_idx)
+        speed = self.movement_tracker.get_movement_speed(joint_idx)
+        return {
+            'direction': direction,
+            'speed': speed,
+            'is_moving': speed > 5
+        }
+    
+    def get_quality_feedback(self, keypoints: np.ndarray, num_keypoints: int) -> Dict[str, str]:
+        """Get pose quality feedback."""
+        if keypoints is None:
+            return {}
+        return self.quality_analyzer.analyze_body_alignment(keypoints, num_keypoints)
+    
+    def get_detailed_description(self, keypoints: np.ndarray, num_keypoints: int) -> List[str]:
+        """Get detailed body part descriptions."""
+        if keypoints is None:
+            return []
+        return self.quality_analyzer.get_detailed_body_description(keypoints, num_keypoints)
+
+
 class PoseClassifier:
     """
     Classifies human poses based on keypoint positions and angles.
@@ -83,6 +418,35 @@ class PoseClassifier:
         and allow pose classification with partial visibility.
         """
         return keypoints[joint_idx, 2] > threshold
+    
+    def calculate_pose_confidence(self, keypoints: np.ndarray) -> float:
+        """
+        Calculate overall confidence score for a pose detection.
+        
+        Args:
+            keypoints: Keypoints array [num_joints, 3]
+            
+        Returns:
+            Confidence score between 0 and 1
+        """
+        if keypoints is None:
+            return 0.0
+        
+        # Count visible keypoints
+        visible_kpts = keypoints[keypoints[:, 2] > 0.1]
+        if len(visible_kpts) == 0:
+            return 0.0
+        
+        # Average confidence of visible keypoints
+        avg_confidence = np.mean(visible_kpts[:, 2])
+        
+        # Weight by number of visible keypoints (more keypoints = higher confidence)
+        visibility_ratio = len(visible_kpts) / len(keypoints)
+        
+        # Combined confidence score
+        confidence = avg_confidence * (0.5 + 0.5 * visibility_ratio)
+        
+        return float(np.clip(confidence, 0.0, 1.0))
     
     def classify_pose(self, keypoints: np.ndarray) -> str:
         """
@@ -391,6 +755,88 @@ class PoseClassifier:
         if visible_count > 0:
             return f"Detecting pose... ({visible_count}/{num_keypoints} keypoints visible)"
         
+        # Check for Crossed Arms
+        if (r_shoulder is not None and l_shoulder is not None and
+            r_wrist is not None and l_wrist is not None):
+            
+            # Check if wrists are on opposite sides of body center
+            body_center_x = (r_shoulder[0] + l_shoulder[0]) / 2
+            r_wrist_crossed = r_wrist[0] < body_center_x  # Right wrist on left side
+            l_wrist_crossed = l_wrist[0] > body_center_x  # Left wrist on right side
+            
+            if r_wrist_crossed and l_wrist_crossed:
+                # Check if arms are bent (elbows visible and positioned correctly)
+                if r_elbow is not None and l_elbow is not None:
+                    details = ["crossing your arms in front of your body", "in a defensive or thoughtful posture", "arms positioned across your chest"]
+                    if num_keypoints == 33:
+                        if r_thumb is not None or l_thumb is not None:
+                            details.append("hands and fingers clearly visible")
+                    return f"You're {', '.join(details)}"
+        
+        # Check for Hands Behind Head
+        if (head is not None and r_wrist is not None and l_wrist is not None):
+            # Check if wrists are behind and above head
+            if (r_wrist[1] < head[1] and l_wrist[1] < head[1] and
+                abs(r_wrist[0] - head[0]) < 100 and abs(l_wrist[0] - head[0]) < 100):
+                details = ["placing your hands behind your head", "in a relaxed or stretching posture", "arms elevated behind your head"]
+                if num_keypoints == 33:
+                    if r_index is not None or l_index is not None:
+                        details.append("fingers extended and visible")
+                return f"You're {', '.join(details)}"
+        
+        # Check for Leaning (body not vertical)
+        if (thorax is not None and r_hip is not None and l_hip is not None):
+            hip_center = np.array([(r_hip[0] + l_hip[0]) / 2, (r_hip[1] + l_hip[1]) / 2])
+            body_angle = np.arctan2(thorax[0] - hip_center[0], thorax[1] - hip_center[1]) * 180 / np.pi
+            
+            if abs(body_angle) > 15:  # Leaning more than 15 degrees
+                direction = "left" if body_angle < 0 else "right"
+                details = [f"leaning to your {direction}", "body shifted from vertical", "in a dynamic posture"]
+                return f"You're {', '.join(details)}"
+        
+        # Check for Squatting (knees bent, hips low)
+        if num_keypoints == 33:
+            r_ankle_pt = get_point(28)  # right_ankle
+            l_ankle_pt = get_point(27)  # left_ankle
+            r_heel_pt = get_point(30)   # right_heel
+            l_heel_pt = get_point(29)   # left_heel
+        else:
+            r_ankle_pt = get_point(0)   # r_ankle (MPII)
+            l_ankle_pt = get_point(5)   # l_ankle (MPII)
+            r_heel_pt = None
+            l_heel_pt = None
+        
+        if (r_hip is not None and l_hip is not None and
+            r_knee is not None and l_knee is not None and
+            r_ankle_pt is not None and l_ankle_pt is not None):
+            
+            hip_y_avg = (r_hip[1] + l_hip[1]) / 2
+            knee_y_avg = (r_knee[1] + l_knee[1]) / 2
+            ankle_y_avg = (r_ankle_pt[1] + l_ankle_pt[1]) / 2
+            
+            # If hips are close to knees and knees are bent
+            if (abs(hip_y_avg - knee_y_avg) < 80 and 
+                knee_y_avg < ankle_y_avg - 50):  # Knees above ankles
+                details = ["squatting down", "knees bent in a low position", "hips positioned close to your knees"]
+                if num_keypoints == 33:
+                    if r_heel_pt is not None or l_heel_pt is not None:
+                        details.append("feet flat on the ground")
+                return f"You're {', '.join(details)}"
+        
+        # Check for Lunge Position
+        if (r_hip is not None and l_hip is not None and
+            r_knee is not None and l_knee is not None and
+            r_ankle_pt is not None and l_ankle_pt is not None):
+            
+            # Check if one leg is significantly forward
+            r_leg_forward = r_ankle_pt[0] > r_hip[0] + 50
+            l_leg_forward = l_ankle_pt[0] < l_hip[0] - 50
+            
+            if r_leg_forward or l_leg_forward:
+                leg = "right" if r_leg_forward else "left"
+                details = [f"in a lunge position with your {leg} leg forward", "one leg extended forward", "in a dynamic athletic stance"]
+                return f"You're {', '.join(details)}"
+        
         # Default: Standing
         return "You're standing in a neutral position"
 
@@ -531,6 +977,11 @@ class IntegratedPoseSystem:
         
         # Initialize pose classifier
         self.pose_classifier = PoseClassifier()
+        
+        # Initialize pose history trackers for temporal smoothing
+        self.pose_history_trackers = {}  # person_id -> PoseHistoryTracker
+        self.person_id_counter = 0
+        self.person_tracking = {}  # Track people across frames
     
     def predict_trained_model(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """
@@ -630,6 +1081,62 @@ class IntegratedPoseSystem:
             return 0.0
         
         return inter_area / union_area
+    
+    def _assign_person_id(self, bbox: List[int], center: Tuple[float, float]) -> int:
+        """
+        Assign or match person ID based on position tracking.
+        
+        Args:
+            bbox: Bounding box [x, y, w, h]
+            center: Center point (x, y)
+            
+        Returns:
+            Person ID (existing or new)
+        """
+        # Check if this detection matches an existing person
+        for person_id, (prev_bbox, prev_center, frames_since_seen) in self.person_tracking.items():
+            if frames_since_seen > 10:  # Person lost for too long, remove
+                continue
+            
+            # Calculate distance to previous position
+            center_dist = np.sqrt((center[0] - prev_center[0])**2 + 
+                                 (center[1] - prev_center[1])**2)
+            
+            # Calculate IoU with previous bbox
+            iou = self._calculate_bbox_iou(bbox, prev_bbox)
+            
+            # If close enough, it's the same person
+            avg_size = (bbox[2] + bbox[3] + prev_bbox[2] + prev_bbox[3]) / 4
+            threshold = max(100, avg_size * 0.4)
+            
+            if center_dist < threshold or iou > 0.3:
+                # Update tracking info
+                self.person_tracking[person_id] = (bbox, center, 0)
+                return person_id
+        
+        # New person detected
+        new_id = self.person_id_counter
+        self.person_id_counter += 1
+        self.person_tracking[new_id] = (bbox, center, 0)
+        
+        # Initialize history tracker for new person
+        if new_id not in self.pose_history_trackers:
+            self.pose_history_trackers[new_id] = PoseHistoryTracker(history_size=10, smoothing_alpha=0.7)
+        
+        return new_id
+    
+    def _update_person_tracking(self):
+        """Update frames since seen for all tracked people."""
+        to_remove = []
+        for person_id, (bbox, center, frames_since_seen) in self.person_tracking.items():
+            self.person_tracking[person_id] = (bbox, center, frames_since_seen + 1)
+            if frames_since_seen > 20:  # Remove if not seen for 20 frames
+                to_remove.append(person_id)
+        
+        for person_id in to_remove:
+            del self.person_tracking[person_id]
+            if person_id in self.pose_history_trackers:
+                del self.pose_history_trackers[person_id]
     
     def _is_duplicate_detection(self, new_bbox: List[int], existing_bboxes: List[List[int]], 
                                 new_center: Tuple[float, float], 
@@ -889,7 +1396,7 @@ class IntegratedPoseSystem:
         
         return vis_frame
     
-    def draw_side_panel(self, frame: np.ndarray, people_data: List[Tuple[int, str, np.ndarray]]) -> np.ndarray:
+    def draw_side_panel(self, frame: np.ndarray, people_data: List[Tuple]) -> np.ndarray:
         """
         Draw chatbot-style side panel showing pose descriptions.
         
@@ -945,7 +1452,15 @@ class IntegratedPoseSystem:
         y_offset = chat_start_y
         line_spacing = 18  # Smaller spacing for more text
         
-        for person_id, pose_name, keypoints in people_data:
+        for person_data in people_data:
+            # Handle both old format (3 items) and new format (6 items)
+            if len(person_data) >= 6:
+                person_id, pose_name, keypoints, quality_feedback, body_details, movement_info = person_data[:6]
+            else:
+                person_id, pose_name, keypoints = person_data[:3]
+                quality_feedback = {}
+                body_details = []
+                movement_info = {}
             # Person label (smaller, chatbot style)
             person_label = f"Person {person_id + 1}:"
             cv2.putText(vis_frame, person_label, (panel_x + 15, y_offset),
@@ -1015,8 +1530,72 @@ class IntegratedPoseSystem:
                              (30, 30, 40), -1)
                 cv2.putText(vis_frame, kpt_text, (panel_x + 20, y_offset + kpt_size[1]),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 200), 1)
-                y_offset += kpt_size[1] + 15
-            else:
+                y_offset += kpt_size[1] + 10
+            
+            # Quality feedback section
+            if quality_feedback:
+                y_offset += 5
+                quality_title = "Posture Quality:"
+                title_size = cv2.getTextSize(quality_title, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
+                cv2.putText(vis_frame, quality_title, (panel_x + 15, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 200), 1)
+                y_offset += 15
+                
+                for key, feedback_text in quality_feedback.items():
+                    # Color code: green for good, yellow for warnings
+                    color = (100, 255, 100) if "✓" in feedback_text else (100, 200, 255)
+                    
+                    # Wrap feedback text
+                    words = feedback_text.split()
+                    current_line = ""
+                    for word in words:
+                        test_line = current_line + (" " if current_line else "") + word
+                        test_size = cv2.getTextSize(test_line, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)[0]
+                        if test_size[0] > max_width and current_line:
+                            # Draw current line
+                            text_size = cv2.getTextSize(current_line, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)[0]
+                            cv2.rectangle(vis_frame,
+                                         (panel_x + 20, y_offset - text_size[1] - 2),
+                                         (panel_x + 20 + text_size[0] + 8, y_offset + 2),
+                                         (25, 25, 35), -1)
+                            cv2.putText(vis_frame, current_line, (panel_x + 24, y_offset),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+                            y_offset += text_size[1] + 5
+                            current_line = word
+                        else:
+                            current_line = test_line
+                    
+                    # Draw remaining line
+                    if current_line:
+                        text_size = cv2.getTextSize(current_line, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)[0]
+                        cv2.rectangle(vis_frame,
+                                     (panel_x + 20, y_offset - text_size[1] - 2),
+                                     (panel_x + 20 + text_size[0] + 8, y_offset + 2),
+                                     (25, 25, 35), -1)
+                        cv2.putText(vis_frame, current_line, (panel_x + 24, y_offset),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+                        y_offset += text_size[1] + 8
+            
+            # Body part details section
+            if body_details:
+                y_offset += 5
+                details_title = "Body Position Details:"
+                title_size = cv2.getTextSize(details_title, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
+                cv2.putText(vis_frame, details_title, (panel_x + 15, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 255), 1)
+                y_offset += 15
+                
+                for detail in body_details[:4]:  # Limit to 4 details to save space
+                    text_size = cv2.getTextSize(detail, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)[0]
+                    cv2.rectangle(vis_frame,
+                                 (panel_x + 20, y_offset - text_size[1] - 2),
+                                 (panel_x + 20 + text_size[0] + 8, y_offset + 2),
+                                 (35, 35, 45), -1)
+                    cv2.putText(vis_frame, detail, (panel_x + 24, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.35, (220, 220, 240), 1)
+                    y_offset += text_size[1] + 6
+            
+            if not quality_feedback and not body_details:
                 y_offset += 10
             
             # Add separator between people (if multiple)
@@ -1103,16 +1682,81 @@ class IntegratedPoseSystem:
                     ((0, 165, 255), (255, 203, 192)),  # Person 5: Orange/Peach
                 ]
                 
-                # Process each detected person
-                for person_id, (keypoints, bbox) in enumerate(detected_people):
-                    if person_id >= len(person_colors):
-                        break
+                # Process each detected person with tracking and smoothing
+                for idx, (keypoints, bbox) in enumerate(detected_people):
+                    # Calculate center for tracking
+                    visible_kpts = keypoints[keypoints[:, 2] > 0.1] if keypoints is not None else None
+                    if visible_kpts is None or len(visible_kpts) == 0:
+                        continue
                     
-                    # Classify pose for this person with detailed description
+                    center = (np.mean(visible_kpts[:, 0]), np.mean(visible_kpts[:, 1]))
+                    
+                    # Assign or match person ID
+                    person_id = self._assign_person_id(bbox, center)
+                    
+                    if person_id >= len(person_colors):
+                        continue
+                    
+                    # Get or create history tracker for this person
+                    if person_id not in self.pose_history_trackers:
+                        self.pose_history_trackers[person_id] = PoseHistoryTracker(history_size=10, smoothing_alpha=0.7)
+                    
+                    tracker = self.pose_history_trackers[person_id]
+                    
+                    # Smooth keypoints using temporal smoothing
+                    smoothed_keypoints = tracker.smooth_keypoints(keypoints)
+                    if smoothed_keypoints is not None:
+                        keypoints = smoothed_keypoints
+                    
+                    # Calculate pose confidence
+                    pose_confidence = self.pose_classifier.calculate_pose_confidence(keypoints)
+                    
+                    # Classify pose for this person
                     pose_name = self.pose_classifier.classify_pose(keypoints)
                     
+                    # Add to history and get smoothed pose
+                    tracker.add_frame(pose_name, keypoints, pose_confidence)
+                    smoothed_pose = tracker.get_smoothed_pose()
+                    
+                    # Detect activity
+                    activity = tracker.detect_activity()
+                    
+                    # Get movement info for key joints
+                    num_kpts = len(keypoints)
+                    movement_info = {}
+                    if num_kpts == 33:
+                        # Track right wrist movement
+                        r_wrist_movement = tracker.get_movement_info(16)
+                        l_wrist_movement = tracker.get_movement_info(15)
+                        movement_info['right_hand'] = r_wrist_movement
+                        movement_info['left_hand'] = l_wrist_movement
+                    
+                    # Get quality feedback
+                    quality_feedback = tracker.get_quality_feedback(keypoints, num_kpts)
+                    
+                    # Get detailed body descriptions
+                    body_details = tracker.get_detailed_description(keypoints, num_kpts)
+                    
+                    # Build enhanced pose description
+                    if activity:
+                        pose_name = f"{smoothed_pose} - {activity}"
+                    else:
+                        pose_name = smoothed_pose
+                    
+                    # Add movement info to pose name if significant
+                    if movement_info.get('right_hand', {}).get('is_moving') or movement_info.get('left_hand', {}).get('is_moving'):
+                        moving_hands = []
+                        if movement_info.get('right_hand', {}).get('is_moving'):
+                            dir_r = movement_info['right_hand']['direction']
+                            moving_hands.append(f"right hand moving {dir_r}")
+                        if movement_info.get('left_hand', {}).get('is_moving'):
+                            dir_l = movement_info['left_hand']['direction']
+                            moving_hands.append(f"left hand moving {dir_l}")
+                        if moving_hands:
+                            pose_name += f" ({', '.join(moving_hands)})"
+                    
                     # Get colors for this person
-                    skeleton_color, keypoint_color = person_colors[person_id]
+                    skeleton_color, keypoint_color = person_colors[person_id % len(person_colors)]
                     
                     # Visualize this person's pose
                     vis_frame = self.visualize_pose(
@@ -1123,18 +1767,21 @@ class IntegratedPoseSystem:
                         keypoints_already_scaled=True
                     )
                     
-                    # Draw bounding box with person label
+                    # Draw bounding box with person label and confidence
                     x, y, w, h = bbox
                     cv2.rectangle(vis_frame, (x, y), (x + w, y + h), skeleton_color, 3)
-                    label = f"Person {person_id + 1}"
+                    label = f"Person {person_id + 1} ({pose_confidence:.0%})"
                     label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
                     cv2.rectangle(vis_frame, (x, y - label_size[1] - 15),
                                  (x + label_size[0] + 15, y), skeleton_color, -1)
                     cv2.putText(vis_frame, label, (x + 8, y - 8),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                     
-                    # Store data for side panel with pose description
-                    people_data.append((person_id, pose_name, keypoints))
+                    # Store data for side panel with pose description and additional info
+                    people_data.append((person_id, pose_name, keypoints, quality_feedback, body_details, movement_info))
+                
+                # Update person tracking (increment frames since seen)
+                self._update_person_tracking()
                 
                 # Draw side panel with detailed pose information for all people
                 if len(people_data) > 0:
@@ -1166,22 +1813,131 @@ class IntegratedPoseSystem:
                 keypoints_to_use = None
                 people_data = []
                 
+                # Initialize tracker for single person mode
+                if 0 not in self.pose_history_trackers:
+                    self.pose_history_trackers[0] = PoseHistoryTracker(history_size=10, smoothing_alpha=0.7)
+                tracker = self.pose_history_trackers[0]
+                
                 if trained_kpts is not None:
                     keypoints_to_use = trained_kpts
-                    pose_name = self.pose_classifier.classify_pose(trained_kpts)
-                    vis_frame = self.visualize_pose(vis_frame, trained_kpts, "Trained", 
+                    
+                    # Smooth keypoints
+                    smoothed_keypoints = tracker.smooth_keypoints(trained_kpts)
+                    if smoothed_keypoints is not None:
+                        keypoints_to_use = smoothed_keypoints
+                    
+                    # Calculate confidence
+                    pose_confidence = self.pose_classifier.calculate_pose_confidence(keypoints_to_use)
+                    
+                    # Classify pose
+                    pose_name = self.pose_classifier.classify_pose(keypoints_to_use)
+                    
+                    # Add to history and get smoothed pose
+                    tracker.add_frame(pose_name, keypoints_to_use, pose_confidence)
+                    smoothed_pose = tracker.get_smoothed_pose()
+                    
+                    # Detect activity
+                    activity = tracker.detect_activity()
+                    
+                    # Get movement info for key joints
+                    num_kpts = len(keypoints_to_use)
+                    movement_info = {}
+                    if num_kpts == 33:
+                        # Track right wrist movement
+                        r_wrist_movement = tracker.get_movement_info(16)
+                        l_wrist_movement = tracker.get_movement_info(15)
+                        movement_info['right_hand'] = r_wrist_movement
+                        movement_info['left_hand'] = l_wrist_movement
+                    
+                    # Get quality feedback
+                    quality_feedback = tracker.get_quality_feedback(keypoints_to_use, num_kpts)
+                    
+                    # Get detailed body descriptions
+                    body_details = tracker.get_detailed_description(keypoints_to_use, num_kpts)
+                    
+                    # Build enhanced pose description
+                    if activity:
+                        pose_name = f"{smoothed_pose} - {activity}"
+                    else:
+                        pose_name = smoothed_pose
+                    
+                    # Add movement info to pose name if significant
+                    if movement_info.get('right_hand', {}).get('is_moving') or movement_info.get('left_hand', {}).get('is_moving'):
+                        moving_hands = []
+                        if movement_info.get('right_hand', {}).get('is_moving'):
+                            dir_r = movement_info['right_hand']['direction']
+                            moving_hands.append(f"right hand moving {dir_r}")
+                        if movement_info.get('left_hand', {}).get('is_moving'):
+                            dir_l = movement_info['left_hand']['direction']
+                            moving_hands.append(f"left hand moving {dir_l}")
+                        if moving_hands:
+                            pose_name += f" ({', '.join(moving_hands)})"
+                    
+                    vis_frame = self.visualize_pose(vis_frame, keypoints_to_use, "Trained", 
                                                    skeleton_color=(0, 255, 255),
                                                    keypoint_color=(203, 192, 255),
                                                    show_pose_name=False, keypoints_already_scaled=False)
-                    people_data.append((0, pose_name, trained_kpts))
+                    people_data.append((0, pose_name, keypoints_to_use, quality_feedback, body_details, movement_info))
                 elif mediapipe_kpts is not None:
                     keypoints_to_use = mediapipe_kpts
-                    pose_name = self.pose_classifier.classify_pose(mediapipe_kpts)
-                    vis_frame = self.visualize_pose(vis_frame, mediapipe_kpts, "MediaPipe", 
+                    
+                    # Smooth keypoints
+                    smoothed_keypoints = tracker.smooth_keypoints(mediapipe_kpts)
+                    if smoothed_keypoints is not None:
+                        keypoints_to_use = smoothed_keypoints
+                    
+                    # Calculate confidence
+                    pose_confidence = self.pose_classifier.calculate_pose_confidence(keypoints_to_use)
+                    
+                    # Classify pose
+                    pose_name = self.pose_classifier.classify_pose(keypoints_to_use)
+                    
+                    # Add to history and get smoothed pose
+                    tracker.add_frame(pose_name, keypoints_to_use, pose_confidence)
+                    smoothed_pose = tracker.get_smoothed_pose()
+                    
+                    # Detect activity
+                    activity = tracker.detect_activity()
+                    
+                    # Get movement info for key joints
+                    num_kpts = len(keypoints_to_use)
+                    movement_info = {}
+                    if num_kpts == 33:
+                        # Track right wrist movement
+                        r_wrist_movement = tracker.get_movement_info(16)
+                        l_wrist_movement = tracker.get_movement_info(15)
+                        movement_info['right_hand'] = r_wrist_movement
+                        movement_info['left_hand'] = l_wrist_movement
+                    
+                    # Get quality feedback
+                    quality_feedback = tracker.get_quality_feedback(keypoints_to_use, num_kpts)
+                    
+                    # Get detailed body descriptions
+                    body_details = tracker.get_detailed_description(keypoints_to_use, num_kpts)
+                    
+                    # Build enhanced pose description
+                    if activity:
+                        pose_name = f"{smoothed_pose} - {activity}"
+                    else:
+                        pose_name = smoothed_pose
+                    
+                    # Add movement info to pose name if significant
+                    if movement_info.get('right_hand', {}).get('is_moving') or movement_info.get('left_hand', {}).get('is_moving'):
+                        moving_hands = []
+                        if movement_info.get('right_hand', {}).get('is_moving'):
+                            dir_r = movement_info['right_hand']['direction']
+                            moving_hands.append(f"right hand moving {dir_r}")
+                        if movement_info.get('left_hand', {}).get('is_moving'):
+                            dir_l = movement_info['left_hand']['direction']
+                            moving_hands.append(f"left hand moving {dir_l}")
+                        if moving_hands:
+                            pose_name += f" ({', '.join(moving_hands)})"
+                    
+                    vis_frame = self.visualize_pose(vis_frame, keypoints_to_use, "MediaPipe", 
                                                    skeleton_color=(0, 255, 255),
                                                    keypoint_color=(203, 192, 255),
                                                    show_pose_name=False, keypoints_already_scaled=True)
-                    people_data.append((0, pose_name, mediapipe_kpts))
+                    people_data.append((0, pose_name, keypoints_to_use, quality_feedback, body_details, movement_info))
                 
                 # Draw chatbot-style side panel for single person
                 if len(people_data) > 0:
