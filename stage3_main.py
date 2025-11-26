@@ -31,6 +31,7 @@ from visualize import (
     create_before_after_comparison, create_metrics_overlay,
     create_block_diagram, generate_quality_report
 )
+from memory_tracker import MemoryTracker, optimize_memory
 
 
 def create_output_directories():
@@ -138,14 +139,17 @@ def run_data_cleaning(images_dir: str, sample_size: int = 20) -> Dict:
         metrics = compare_pre_post_metrics(image, enhanced)
         enhancement_improvements.append(metrics['improvements'])
 
-        # Create comparison visualizations (first 5 only)
-        if len([p for p in Path("outputs/validation").glob("*_comparison.png")]) < 5:
+        # Create comparison visualizations (first 10 only to match reference style)
+        existing_comparisons = len([p for p in Path("outputs/validation").glob("*_comparison.png")])
+        if existing_comparisons < 10:
             base_name = os.path.splitext(os.path.basename(image_path))[0]
+            # Create before/after comparison with proper title format
             create_before_after_comparison(
                 image, enhanced,
                 title=f"Validation: {os.path.basename(image_path)}",
                 save_path=f"outputs/validation/{base_name}_comparison.png"
             )
+            # Create metrics overlay
             create_metrics_overlay(
                 image, enhanced,
                 save_path=f"outputs/validation/{base_name}_metrics.png"
@@ -289,6 +293,10 @@ def main():
     print("Dataset Preparation and Analysis")
     print("="*60)
 
+    # Initialize memory tracker
+    memory_tracker = MemoryTracker()
+    print(f"\nInitial Memory: {memory_tracker.initial_memory['rss_mb']:.2f} MB")
+
     # Configuration
     IMAGES_DIR = "images"
     MAX_IMAGES_FOR_EDA = None  # Set to None to process all images, or a number for testing
@@ -300,14 +308,26 @@ def main():
     print("\nGenerating pipeline block diagram...")
     create_block_diagram("outputs/validation/pipeline_diagram.png")
 
-    # Step 1: Exploratory Data Analysis
+    # Step 1: Exploratory Data Analysis (STAGE 1)
+    memory_tracker.start_stage("Stage 1: Exploratory Data Analysis (EDA)")
     eda_summary, eda_df = run_eda(IMAGES_DIR, max_images=MAX_IMAGES_FOR_EDA)
+    memory_tracker.end_stage()
+    memory_tracker.print_stage_report("Stage 1: Exploratory Data Analysis (EDA)")
+    optimize_memory()  # Clean up after EDA
 
-    # Step 2: Data Validation & Cleaning
+    # Step 2: Data Validation & Cleaning (STAGE 2)
+    memory_tracker.start_stage("Stage 2: Image Cleaning")
     cleaning_stats = run_data_cleaning(IMAGES_DIR, sample_size=20)
+    memory_tracker.end_stage()
+    memory_tracker.print_stage_report("Stage 2: Image Cleaning")
+    optimize_memory()  # Clean up after cleaning
 
-    # Step 3: Data Augmentation & Splitting
+    # Step 3: Data Augmentation & Splitting (STAGE 3)
+    memory_tracker.start_stage("Stage 3: Image Enhancement & Augmentation")
     augmentation_stats = run_augmentation_and_splitting(IMAGES_DIR)
+    memory_tracker.end_stage()
+    memory_tracker.print_stage_report("Stage 3: Image Enhancement & Augmentation")
+    optimize_memory()  # Clean up after augmentation
 
     # Generate dataset_stats.json
     generate_dataset_stats_json(eda_summary, cleaning_stats, augmentation_stats)

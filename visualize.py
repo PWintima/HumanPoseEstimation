@@ -20,19 +20,19 @@ def create_before_after_comparison(original: np.ndarray,
                                   title: str = "Before/After Comparison",
                                   save_path: Optional[str] = None) -> np.ndarray:
     """
-    Create a side-by-side before/after comparison image.
-
-    Concatenates original and enhanced images horizontally with
-    labels and optional metrics overlay.
+    Create a side-by-side before/after comparison image matching the reference style.
+    
+    Creates a clean before/after comparison with labels in bottom corners,
+    matching the style shown in validation images.
 
     Args:
         original: Original image in BGR format.
         enhanced: Enhanced image in BGR format.
-        title: Title for the comparison.
+        title: Title for the comparison (e.g., "Validation: filename.jpg").
         save_path: Optional path to save the comparison image.
 
     Returns:
-        Comparison image as numpy array.
+        Comparison image as numpy array (BGR format).
     """
     # Ensure images have the same height
     h1, w1 = original.shape[:2]
@@ -47,37 +47,80 @@ def create_before_after_comparison(original: np.ndarray,
         new_w2 = int(w2 * scale2)
         original = cv2.resize(original, (new_w1, target_height))
         enhanced = cv2.resize(enhanced, (new_w2, target_height))
+        h1, w1 = original.shape[:2]
+        h2, w2 = enhanced.shape[:2]
 
-    # Concatenate horizontally
-    comparison = np.hstack([original, enhanced])
+    # Concatenate horizontally with a small gap
+    gap = 0  # No gap for cleaner look
+    comparison = np.zeros((h1, w1 + w2 + gap, 3), dtype=np.uint8)
+    comparison[:, :w1] = original
+    comparison[:, w1 + gap:] = enhanced
 
-    # Add labels
-    comparison_rgb = cv2.cvtColor(comparison, cv2.COLOR_BGR2RGB)
-    h, w = comparison_rgb.shape[:2]
+    h, w = comparison.shape[:2]
 
-    # Create figure
-    fig, ax = plt.subplots(figsize=(16, 8))
-    ax.imshow(comparison_rgb)
-    ax.axis('off')
+    # Add BEFORE label (bottom right of left image)
+    before_label = "BEFORE"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.8
+    thickness = 2
+    (text_width, text_height), baseline = cv2.getTextSize(before_label, font, font_scale, thickness)
+    
+    # Position: bottom right corner of left image
+    label_x = w1 - text_width - 15
+    label_y = h1 - 15
+    
+    # Draw black rectangle background
+    cv2.rectangle(comparison,
+                 (label_x - 10, label_y - text_height - 10),
+                 (label_x + text_width + 10, label_y + baseline + 5),
+                 (0, 0, 0), -1)
+    
+    # Draw white text
+    cv2.putText(comparison, before_label, (label_x, label_y),
+               font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
-    # Add text labels
-    ax.text(w1 // 2, h - 30, 'BEFORE', ha='center', va='top',
-            fontsize=20, fontweight='bold', color='white',
-            bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+    # Add AFTER label (bottom right of right image)
+    after_label = "AFTER"
+    (text_width, text_height), baseline = cv2.getTextSize(after_label, font, font_scale, thickness)
+    
+    # Position: bottom right corner of right image
+    label_x = w - text_width - 15
+    label_y = h - 15
+    
+    # Draw green rectangle background
+    cv2.rectangle(comparison,
+                 (label_x - 10, label_y - text_height - 10),
+                 (label_x + text_width + 10, label_y + baseline + 5),
+                 (0, 128, 0), -1)  # Green color
+    
+    # Draw white text
+    cv2.putText(comparison, after_label, (label_x, label_y),
+               font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
-    ax.text(w1 + w2 // 2, h - 30, 'AFTER', ha='center', va='top',
-            fontsize=20, fontweight='bold', color='white',
-            bbox=dict(boxstyle='round', facecolor='green', alpha=0.7))
+    # Add title at the top center (if provided)
+    if title:
+        title_font_scale = 0.7
+        title_thickness = 2
+        (title_width, title_height), title_baseline = cv2.getTextSize(title, font, title_font_scale, title_thickness)
+        title_x = (w - title_width) // 2
+        title_y = 30
+        
+        # Draw semi-transparent background for title
+        overlay = comparison.copy()
+        cv2.rectangle(overlay,
+                     (title_x - 15, title_y - title_height - 10),
+                     (title_x + title_width + 15, title_y + title_baseline + 5),
+                     (255, 255, 255), -1)
+        cv2.addWeighted(overlay, 0.7, comparison, 0.3, 0, comparison)
+        
+        # Draw title text
+        cv2.putText(comparison, title, (title_x, title_y),
+                   font, title_font_scale, (0, 0, 0), title_thickness, cv2.LINE_AA)
 
-    ax.set_title(title, fontsize=24, fontweight='bold', pad=20)
-
-    plt.tight_layout()
-
+    # Save if path provided
     if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        cv2.imwrite(save_path, comparison)
         print(f"Comparison saved to {save_path}")
-
-    plt.close()
 
     return comparison
 

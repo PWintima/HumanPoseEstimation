@@ -130,7 +130,7 @@ def apply_denoising(image: np.ndarray, method: str = 'bilateral') -> np.ndarray:
 
     Provides multiple denoising methods:
     - 'bilateral': Preserves edges while reducing noise
-    - 'gaussian': Fast Gaussian blur
+    - 'gaussian': Fast Gaussian blur → remove high-frequency noise
     - 'median': Effective for salt-and-pepper noise
     - 'nlmeans': Non-local means denoising (best quality, slower)
 
@@ -145,7 +145,7 @@ def apply_denoising(image: np.ndarray, method: str = 'bilateral') -> np.ndarray:
         # Bilateral filter preserves edges
         denoised = cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
     elif method == 'gaussian':
-        # Gaussian blur for general denoising
+        # Gaussian blur for general denoising → remove high-frequency noise
         denoised = cv2.GaussianBlur(image, (5, 5), 0)
     elif method == 'median':
         # Median filter for salt-and-pepper noise
@@ -159,6 +159,106 @@ def apply_denoising(image: np.ndarray, method: str = 'bilateral') -> np.ndarray:
         raise ValueError(f"Unknown denoising method: {method}")
 
     return denoised
+
+
+def apply_adaptive_smoothing(image: np.ndarray, blur_score: float, 
+                             threshold: float = 100.0) -> np.ndarray:
+    """
+    Apply adaptive smoothing based on blur detection.
+    
+    Light cleaning for already-clear images, stronger cleaning for blurry ones.
+    Uses Laplacian-based blur detection to determine smoothing strength.
+    
+    Args:
+        image: Input image in BGR format.
+        blur_score: Variance of Laplacian blur score.
+        threshold: Blur threshold (lower = more sensitive to blur).
+    
+    Returns:
+        Adaptively smoothed image in BGR format.
+    """
+    is_blurry = blur_score < threshold
+    
+    if is_blurry:
+        # Stronger cleaning for blurry images
+        # Use Gaussian + Median for blurry samples (less noise)
+        smoothed = cv2.GaussianBlur(image, (5, 5), 0)
+        smoothed = cv2.medianBlur(smoothed, 5)
+    else:
+        # Light cleaning for already-clear images
+        # Use bilateral filter to preserve structure
+        smoothed = cv2.bilateralFilter(image, d=5, sigmaColor=50, sigmaSpace=50)
+    
+    return smoothed
+
+
+def enhance_edges_laplacian(image: np.ndarray, alpha: float = 0.3) -> np.ndarray:
+    """
+    Enhance edges using Laplacian operator → detect blur + preserve structure.
+    
+    The Laplacian operator highlights edges. This function uses it to
+    enhance edge definition while preserving image structure.
+    
+    Args:
+        image: Input image in BGR format.
+        alpha: Strength of edge enhancement (0.0 to 1.0).
+    
+    Returns:
+        Edge-enhanced image in BGR format.
+    """
+    # Convert to grayscale for Laplacian
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Laplacian operator
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    
+    # Normalize Laplacian to [0, 255]
+    laplacian_normalized = cv2.normalize(laplacian, None, 0, 255, cv2.NORM_MINMAX)
+    laplacian_normalized = laplacian_normalized.astype(np.uint8)
+    
+    # Convert back to BGR
+    laplacian_bgr = cv2.cvtColor(laplacian_normalized, cv2.COLOR_GRAY2BGR)
+    
+    # Blend with original image to enhance edges
+    enhanced = cv2.addWeighted(image, 1.0 - alpha, laplacian_bgr, alpha, 0)
+    
+    return enhanced
+
+
+def normalize_brightness(image: np.ndarray, target_brightness: float = 128.0) -> np.ndarray:
+    """
+    Normalize brightness across images for consistency.
+    
+    Adjusts image brightness to a target value to ensure consistent
+    brightness across the dataset, reducing model confusion.
+    
+    Args:
+        image: Input image in BGR format.
+        target_brightness: Target brightness value (0-255).
+    
+    Returns:
+        Brightness-normalized image in BGR format.
+    """
+    # Convert to LAB color space
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a, b = cv2.split(lab)
+    
+    # Calculate current average brightness
+    current_brightness = np.mean(l_channel)
+    
+    # Calculate adjustment factor
+    if current_brightness > 0:
+        adjustment = target_brightness / current_brightness
+        # Apply adjustment with clipping
+        l_channel_adjusted = np.clip(l_channel * adjustment, 0, 255).astype(np.uint8)
+    else:
+        l_channel_adjusted = l_channel
+    
+    # Merge channels and convert back to BGR
+    lab_normalized = cv2.merge([l_channel_adjusted, a, b])
+    normalized = cv2.cvtColor(lab_normalized, cv2.COLOR_LAB2BGR)
+    
+    return normalized
 
 
 def normalize_image(image: np.ndarray, method: str = 'minmax') -> np.ndarray:
@@ -191,13 +291,83 @@ def normalize_image(image: np.ndarray, method: str = 'minmax') -> np.ndarray:
         raise ValueError(f"Unknown normalization method: {method}")
 
 
+def apply_stage4_preprocessing(image: np.ndarray, 
+                               mean_brightness: float = 120.0) -> np.ndarray:
+    """
+    Apply Stage 4 preprocessing pipeline (best variant from report).
+    
+    Implements the optimal preprocessing variant: CLAHE + Gamma + Median
+    which achieved 82% Good, 13% Acceptable, 5% Poor ratings.
+    
+    Pipeline order (matching Stage 4 report):
+    1. Intensity normalization (to [0,255])
+    2. CLAHE for local contrast improvement
+    3. Gamma correction (tuned using Stage 3 brightness statistics)
+    4. Median filtering for salt-and-pepper noise removal
+    
+    Args:
+        image: Input image in BGR format.
+        mean_brightness: Mean brightness from Stage 3 EDA (default: 120.0).
+                        Used to tune gamma correction.
+    
+    Returns:
+        Enhanced image in BGR format.
+    """
+    enhanced = image.copy()
+    
+    # Step 1: Intensity normalization to [0,255]
+    enhanced = normalize_image(enhanced, method='minmax')
+    
+    # Step 2: CLAHE for local contrast improvement
+    enhanced = apply_clahe(enhanced, clip_limit=2.0, tile_grid_size=(8, 8))
+    
+    # Step 3: Gamma correction tuned using Stage 3 brightness statistics
+    # Gamma < 1 → brighten dark images, Gamma > 1 → compress overly bright images
+    # Tune gamma based on mean brightness from EDA
+    if mean_brightness < 100:
+        gamma_value = 0.8  # Brighten dark images
+    elif mean_brightness > 150:
+        gamma_value = 1.3  # Compress overly bright images
+    else:
+        gamma_value = 1.0  # No adjustment needed
+    
+    enhanced = gamma_correction(enhanced, gamma=gamma_value)
+    
+    # Step 4: Median filtering for salt-and-pepper noise removal
+    enhanced = apply_denoising(enhanced, method='median')
+    
+    return enhanced
+
+
 def apply_all_enhancements(image: np.ndarray,
                           use_denoising: bool = True,
                           use_clahe: bool = True,
                           use_gamma: bool = False,
-                          gamma_value: float = 1.2) -> np.ndarray:
+                          gamma_value: float = 1.2,
+                          use_adaptive_smoothing: bool = True,
+                          use_edge_enhancement: bool = True,
+                          use_brightness_normalization: bool = True,
+                          use_stage4_pipeline: bool = False,
+                          mean_brightness: float = 120.0) -> np.ndarray:
     """
     Apply a pipeline of enhancement operations to improve image quality.
+    
+    If use_stage4_pipeline=True, applies Stage 4 optimal preprocessing:
+    CLAHE + Gamma + Median (82% Good rating from Stage 4 report).
+    
+    Otherwise, implements Stage 2: Image Cleaning techniques:
+    - Gaussian filtering → remove high-frequency noise
+    - Median filtering → remove salt-and-pepper noise
+    - Laplacian → detect blur + preserve structure
+    - Adaptive smoothing → light cleaning for already-clear images
+    - Blur detection → using Variance of Laplacian
+    
+    Achieves improvements:
+    - Less noise in blurry samples
+    - Clearer outlines of limbs
+    - Better edge definition
+    - Consistent brightness across images
+    - Reduces model confusion
 
     This function chains together multiple enhancement techniques
     in a logical order for optimal results.
@@ -208,21 +378,54 @@ def apply_all_enhancements(image: np.ndarray,
         use_clahe: Whether to apply CLAHE contrast enhancement.
         use_gamma: Whether to apply gamma correction.
         gamma_value: Gamma value if gamma correction is enabled.
+        use_adaptive_smoothing: Whether to use adaptive smoothing based on blur.
+        use_edge_enhancement: Whether to enhance edges using Laplacian.
+        use_brightness_normalization: Whether to normalize brightness.
+        use_stage4_pipeline: If True, use Stage 4 optimal preprocessing (CLAHE+Gamma+Median).
+        mean_brightness: Mean brightness from EDA for gamma tuning (default: 120.0).
 
     Returns:
         Enhanced image in BGR format.
     """
+    # Use Stage 4 optimal preprocessing if requested
+    if use_stage4_pipeline:
+        return apply_stage4_preprocessing(image, mean_brightness=mean_brightness)
+    
     enhanced = image.copy()
+    
+    # Step 0: Detect blur for adaptive processing
+    blur_score = compute_variance_of_laplacian(image)
+    is_blurry = blur_score < 100.0
 
-    # Step 1: Denoising (apply before other enhancements)
-    if use_denoising:
-        enhanced = apply_denoising(enhanced, method='bilateral')
+    # Step 1: Adaptive smoothing based on blur detection
+    # Light cleaning for already-clear images, stronger for blurry ones
+    if use_adaptive_smoothing:
+        enhanced = apply_adaptive_smoothing(enhanced, blur_score, threshold=100.0)
+    elif use_denoising:
+        # Fallback to standard denoising if adaptive smoothing disabled
+        if is_blurry:
+            # For blurry images: Gaussian + Median (less noise in blurry samples)
+            enhanced = apply_denoising(enhanced, method='gaussian')
+            enhanced = apply_denoising(enhanced, method='median')
+        else:
+            # For clear images: Bilateral (preserves edges)
+            enhanced = apply_denoising(enhanced, method='bilateral')
 
-    # Step 2: CLAHE for contrast enhancement
+    # Step 2: Edge enhancement using Laplacian (better edge definition, clearer outlines)
+    if use_edge_enhancement:
+        # Use stronger enhancement for blurry images
+        alpha = 0.4 if is_blurry else 0.2
+        enhanced = enhance_edges_laplacian(enhanced, alpha=alpha)
+
+    # Step 3: CLAHE for contrast enhancement (improves visibility)
     if use_clahe:
         enhanced = apply_clahe(enhanced, clip_limit=2.0)
 
-    # Step 3: Gamma correction for brightness adjustment
+    # Step 4: Brightness normalization (consistent brightness across images)
+    if use_brightness_normalization:
+        enhanced = normalize_brightness(enhanced, target_brightness=128.0)
+
+    # Step 5: Gamma correction for brightness adjustment (optional)
     if use_gamma:
         enhanced = gamma_correction(enhanced, gamma=gamma_value)
 

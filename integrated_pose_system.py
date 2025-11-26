@@ -27,9 +27,424 @@ import time
 import argparse
 from typing import Tuple, Optional, Dict, List
 import os
+import gc
 
 from inference import PoseInference
 from mediapipe_integration import MediaPipePoseEstimator
+
+# Import image enhancement functions
+try:
+    from data_cleaner import apply_all_enhancements, apply_stage4_preprocessing, apply_clahe, gamma_correction
+    ENHANCEMENT_AVAILABLE = True
+except ImportError:
+    ENHANCEMENT_AVAILABLE = False
+    def apply_all_enhancements(image, **kwargs):
+        return image
+    def apply_stage4_preprocessing(image, **kwargs):
+        return image
+    def apply_clahe(image):
+        return image
+    def gamma_correction(image, gamma=1.0):
+        return image
+
+# Try to import memory tracker, but don't fail if psutil is not available
+try:
+    from memory_tracker import MemoryTracker, get_memory_usage_mb, optimize_memory
+    MEMORY_TRACKING_AVAILABLE = True
+except ImportError:
+    MEMORY_TRACKING_AVAILABLE = False
+    # Create dummy functions if memory tracking is not available
+    class MemoryTracker:
+        def __init__(self, *args, **kwargs):
+            pass
+        def start_stage(self, *args, **kwargs):
+            return {}
+        def end_stage(self, *args, **kwargs):
+            return {}
+        def print_summary(self):
+            pass
+    
+    def get_memory_usage_mb():
+        return 0.0
+    
+    def optimize_memory():
+        gc.collect()
+        return 0
+
+
+class KeypointRefiner:
+    """
+    Refines keypoint positions using anatomical constraints and body proportions.
+    
+    This improves accuracy by:
+    - Validating keypoint positions against anatomical constraints
+    - Correcting outliers that don't make anatomical sense
+    - Interpolating missing keypoints based on visible ones
+    - Ensuring body symmetry and proper proportions
+    """
+    
+    def __init__(self):
+        """Initialize keypoint refiner with anatomical constraints."""
+        # Typical body proportions (ratios relative to torso length)
+        self.body_proportions = {
+            'arm_to_torso': 0.85,  # Arm length relative to torso
+            'leg_to_torso': 1.2,    # Leg length relative to torso
+            'head_to_torso': 0.3,   # Head size relative to torso
+            'shoulder_width_to_torso': 0.4,  # Shoulder width relative to torso
+        }
+        
+        # Maximum allowed deviations (as ratios)
+        self.max_deviations = {
+            'arm': 0.3,   # 30% deviation allowed
+            'leg': 0.3,
+            'torso': 0.2,
+        }
+    
+    def refine_keypoints(self, keypoints: np.ndarray, num_keypoints: int) -> np.ndarray:
+        """
+        Refine keypoints using anatomical constraints.
+        
+        Args:
+            keypoints: Keypoints array [num_joints, 3]
+            num_keypoints: Number of keypoints (16 or 33)
+            
+        Returns:
+            Refined keypoints array
+        """
+        if keypoints is None or len(keypoints) == 0:
+            return keypoints
+        
+        refined = keypoints.copy()
+        
+        # Apply anatomical constraints
+        if num_keypoints == 33:
+            refined = self._refine_mediapipe_keypoints(refined)
+        else:
+            refined = self._refine_mpii_keypoints(refined)
+        
+        return refined
+    
+    def _refine_mediapipe_keypoints(self, keypoints: np.ndarray) -> np.ndarray:
+        """Refine MediaPipe 33 keypoints."""
+        # Get key joint indices
+        r_shoulder_idx, l_shoulder_idx = 12, 11
+        r_hip_idx, l_hip_idx = 24, 23
+        r_elbow_idx, l_elbow_idx = 14, 13
+        r_wrist_idx, l_wrist_idx = 16, 15
+        r_knee_idx, l_knee_idx = 26, 25
+        r_ankle_idx, l_ankle_idx = 28, 27
+        
+        # Calculate torso length (shoulder to hip)
+        if (keypoints[r_shoulder_idx, 2] > 0.2 and keypoints[r_hip_idx, 2] > 0.2):
+            torso_length = np.linalg.norm(
+                keypoints[r_shoulder_idx, :2] - keypoints[r_hip_idx, :2]
+            )
+            
+            # Validate and correct arm lengths
+            if keypoints[r_elbow_idx, 2] > 0.2 and keypoints[r_wrist_idx, 2] > 0.2:
+                upper_arm = np.linalg.norm(
+                    keypoints[r_shoulder_idx, :2] - keypoints[r_elbow_idx, :2]
+                )
+                lower_arm = np.linalg.norm(
+                    keypoints[r_elbow_idx, :2] - keypoints[r_wrist_idx, :2]
+                )
+                arm_length = upper_arm + lower_arm
+                expected_arm = torso_length * self.body_proportions['arm_to_torso']
+                
+                # If arm is too long or too short, adjust
+                if arm_length > expected_arm * (1 + self.max_deviations['arm']):
+                    # Scale down arm segments proportionally
+                    scale = expected_arm / arm_length
+                    shoulder_to_elbow = keypoints[r_elbow_idx, :2] - keypoints[r_shoulder_idx, :2]
+                    elbow_to_wrist = keypoints[r_wrist_idx, :2] - keypoints[r_elbow_idx, :2]
+                    keypoints[r_elbow_idx, :2] = keypoints[r_shoulder_idx, :2] + shoulder_to_elbow * scale
+                    keypoints[r_wrist_idx, :2] = keypoints[r_elbow_idx, :2] + elbow_to_wrist * scale
+            
+            # Validate and correct leg lengths
+            if keypoints[r_knee_idx, 2] > 0.2 and keypoints[r_ankle_idx, 2] > 0.2:
+                upper_leg = np.linalg.norm(
+                    keypoints[r_hip_idx, :2] - keypoints[r_knee_idx, :2]
+                )
+                lower_leg = np.linalg.norm(
+                    keypoints[r_knee_idx, :2] - keypoints[r_ankle_idx, :2]
+                )
+                leg_length = upper_leg + lower_leg
+                expected_leg = torso_length * self.body_proportions['leg_to_torso']
+                
+                # If leg is too long or too short, adjust
+                if leg_length > expected_leg * (1 + self.max_deviations['leg']):
+                    scale = expected_leg / leg_length
+                    hip_to_knee = keypoints[r_knee_idx, :2] - keypoints[r_hip_idx, :2]
+                    knee_to_ankle = keypoints[r_ankle_idx, :2] - keypoints[r_knee_idx, :2]
+                    keypoints[r_knee_idx, :2] = keypoints[r_hip_idx, :2] + hip_to_knee * scale
+                    keypoints[r_ankle_idx, :2] = keypoints[r_knee_idx, :2] + knee_to_ankle * scale
+        
+        # Symmetry constraints (left and right should be similar)
+        if (keypoints[r_shoulder_idx, 2] > 0.2 and keypoints[l_shoulder_idx, 2] > 0.2 and
+            keypoints[r_hip_idx, 2] > 0.2 and keypoints[l_hip_idx, 2] > 0.2):
+            
+            # Average shoulder and hip positions for symmetry
+            shoulder_center_y = (keypoints[r_shoulder_idx, 1] + keypoints[l_shoulder_idx, 1]) / 2
+            hip_center_y = (keypoints[r_hip_idx, 1] + keypoints[l_hip_idx, 1]) / 2
+            
+            # Adjust if asymmetry is too large
+            r_shoulder_y_diff = abs(keypoints[r_shoulder_idx, 1] - shoulder_center_y)
+            l_shoulder_y_diff = abs(keypoints[l_shoulder_idx, 1] - shoulder_center_y)
+            
+            if r_shoulder_y_diff > 20 or l_shoulder_y_diff > 20:
+                keypoints[r_shoulder_idx, 1] = shoulder_center_y
+                keypoints[l_shoulder_idx, 1] = shoulder_center_y
+                keypoints[r_hip_idx, 1] = hip_center_y
+                keypoints[l_hip_idx, 1] = hip_center_y
+        
+        return keypoints
+    
+    def _refine_mpii_keypoints(self, keypoints: np.ndarray) -> np.ndarray:
+        """Refine MPII 16 keypoints."""
+        # Similar logic for MPII format
+        # MPII indices: r_shoulder=12, l_shoulder=13, r_hip=2, l_hip=3
+        r_shoulder_idx, l_shoulder_idx = 12, 13
+        r_hip_idx, l_hip_idx = 2, 3
+        
+        if (keypoints[r_shoulder_idx, 2] > 0.2 and keypoints[r_hip_idx, 2] > 0.2):
+            torso_length = np.linalg.norm(
+                keypoints[r_shoulder_idx, :2] - keypoints[r_hip_idx, :2]
+            )
+            # Apply similar constraints as MediaPipe
+            # (Can be extended with MPII-specific logic)
+        
+        return keypoints
+    
+    def interpolate_missing_keypoints(self, keypoints: np.ndarray, num_keypoints: int) -> np.ndarray:
+        """
+        Interpolate missing keypoints based on visible ones.
+        
+        Uses anatomical relationships to estimate missing keypoint positions.
+        """
+        if keypoints is None:
+            return keypoints
+        
+        refined = keypoints.copy()
+        
+        if num_keypoints == 33:
+            # Interpolate missing elbow if shoulder and wrist are visible
+            if (refined[12, 2] > 0.2 and refined[16, 2] > 0.2 and refined[14, 2] < 0.2):
+                # Right elbow missing - interpolate between shoulder and wrist
+                refined[14, :2] = (refined[12, :2] + refined[16, :2]) / 2
+                refined[14, 2] = min(refined[12, 2], refined[16, 2]) * 0.8
+            
+            if (refined[11, 2] > 0.2 and refined[15, 2] > 0.2 and refined[13, 2] < 0.2):
+                # Left elbow missing
+                refined[13, :2] = (refined[11, :2] + refined[15, :2]) / 2
+                refined[13, 2] = min(refined[11, 2], refined[15, 2]) * 0.8
+            
+            # Interpolate missing knee if hip and ankle are visible
+            if (refined[24, 2] > 0.2 and refined[28, 2] > 0.2 and refined[26, 2] < 0.2):
+                # Right knee missing
+                refined[26, :2] = (refined[24, :2] + refined[28, :2]) / 2
+                refined[26, 2] = min(refined[24, 2], refined[28, 2]) * 0.8
+            
+            if (refined[23, 2] > 0.2 and refined[27, 2] > 0.2 and refined[25, 2] < 0.2):
+                # Left knee missing
+                refined[25, :2] = (refined[23, :2] + refined[27, :2]) / 2
+                refined[25, 2] = min(refined[23, 2], refined[27, 2]) * 0.8
+        
+        return refined
+    
+    def filter_outliers(self, keypoints: np.ndarray, num_keypoints: int) -> np.ndarray:
+        """
+        Filter out outlier keypoints that don't make anatomical sense.
+        
+        Implements Stage 4 anatomical plausibility checks using inter-joint distances.
+        Removes keypoints that violate anatomical constraints (e.g., limbs stretched
+        far beyond expected anatomical limits).
+        """
+        if keypoints is None:
+            return keypoints
+        
+        filtered = keypoints.copy()
+        
+        if num_keypoints == 33:
+            # Calculate torso length as reference for anatomical checks
+            r_shoulder_idx, l_shoulder_idx = 12, 11
+            r_hip_idx, l_hip_idx = 24, 23
+            
+            torso_length = None
+            if (filtered[r_shoulder_idx, 2] > 0.2 and filtered[l_shoulder_idx, 2] > 0.2 and
+                filtered[r_hip_idx, 2] > 0.2 and filtered[l_hip_idx, 2] > 0.2):
+                shoulder_center = (filtered[r_shoulder_idx, :2] + filtered[l_shoulder_idx, :2]) / 2
+                hip_center = (filtered[r_hip_idx, :2] + filtered[l_hip_idx, :2]) / 2
+                torso_length = np.linalg.norm(shoulder_center - hip_center)
+            
+            # Anatomical constraints (ratios relative to torso length)
+            if torso_length and torso_length > 0:
+                max_arm_ratio = 1.2  # Arm can be up to 120% of torso length
+                max_leg_ratio = 1.5  # Leg can be up to 150% of torso length
+                max_forearm_ratio = 0.5  # Forearm can be up to 50% of torso length
+                
+                # Check right arm: shoulder -> elbow -> wrist
+                r_elbow_idx, r_wrist_idx = 14, 16
+                if (filtered[r_shoulder_idx, 2] > 0.2 and filtered[r_elbow_idx, 2] > 0.2):
+                    upper_arm_dist = np.linalg.norm(filtered[r_shoulder_idx, :2] - filtered[r_elbow_idx, :2])
+                    if upper_arm_dist > max_arm_ratio * torso_length:
+                        filtered[r_elbow_idx, 2] *= 0.5  # Reduce confidence
+                    
+                    if filtered[r_wrist_idx, 2] > 0.2:
+                        forearm_dist = np.linalg.norm(filtered[r_elbow_idx, :2] - filtered[r_wrist_idx, :2])
+                        if forearm_dist > max_forearm_ratio * torso_length:
+                            filtered[r_wrist_idx, 2] *= 0.5
+                
+                # Check left arm: shoulder -> elbow -> wrist
+                l_elbow_idx, l_wrist_idx = 13, 15
+                if (filtered[l_shoulder_idx, 2] > 0.2 and filtered[l_elbow_idx, 2] > 0.2):
+                    upper_arm_dist = np.linalg.norm(filtered[l_shoulder_idx, :2] - filtered[l_elbow_idx, :2])
+                    if upper_arm_dist > max_arm_ratio * torso_length:
+                        filtered[l_elbow_idx, 2] *= 0.5
+                    
+                    if filtered[l_wrist_idx, 2] > 0.2:
+                        forearm_dist = np.linalg.norm(filtered[l_elbow_idx, :2] - filtered[l_wrist_idx, :2])
+                        if forearm_dist > max_forearm_ratio * torso_length:
+                            filtered[l_wrist_idx, 2] *= 0.5
+                
+                # Check right leg: hip -> knee -> ankle
+                r_knee_idx, r_ankle_idx = 26, 28
+                if (filtered[r_hip_idx, 2] > 0.2 and filtered[r_knee_idx, 2] > 0.2):
+                    thigh_dist = np.linalg.norm(filtered[r_hip_idx, :2] - filtered[r_knee_idx, :2])
+                    if thigh_dist > max_leg_ratio * torso_length:
+                        filtered[r_knee_idx, 2] *= 0.5
+                    
+                    if filtered[r_ankle_idx, 2] > 0.2:
+                        shin_dist = np.linalg.norm(filtered[r_knee_idx, :2] - filtered[r_ankle_idx, :2])
+                        if shin_dist > max_leg_ratio * torso_length:
+                            filtered[r_ankle_idx, 2] *= 0.5
+                
+                # Check left leg: hip -> knee -> ankle
+                l_knee_idx, l_ankle_idx = 25, 27
+                if (filtered[l_hip_idx, 2] > 0.2 and filtered[l_knee_idx, 2] > 0.2):
+                    thigh_dist = np.linalg.norm(filtered[l_hip_idx, :2] - filtered[l_knee_idx, :2])
+                    if thigh_dist > max_leg_ratio * torso_length:
+                        filtered[l_knee_idx, 2] *= 0.5
+                    
+                    if filtered[l_ankle_idx, 2] > 0.2:
+                        shin_dist = np.linalg.norm(filtered[l_knee_idx, :2] - filtered[l_ankle_idx, :2])
+                        if shin_dist > max_leg_ratio * torso_length:
+                            filtered[l_ankle_idx, 2] *= 0.5
+        
+        return filtered
+    
+    def prune_low_confidence_joints(self, keypoints: np.ndarray, 
+                                   confidence_threshold: float = 0.3) -> np.ndarray:
+        """
+        Prune joints with low confidence to remove unstable detections.
+        
+        Stage 4 requirement: Joint-confidence pruning to remove unstable detections.
+        
+        Args:
+            keypoints: Keypoints array [num_joints, 3]
+            confidence_threshold: Minimum confidence to keep a joint (default: 0.3)
+        
+        Returns:
+            Keypoints with low-confidence joints set to zero
+        """
+        if keypoints is None:
+            return keypoints
+        
+        pruned = keypoints.copy()
+        pruned[pruned[:, 2] < confidence_threshold] = [0, 0, 0]
+        
+        return pruned
+
+
+class KalmanFilter:
+    """
+    Simple Kalman filter for keypoint smoothing and prediction.
+    
+    Improves accuracy by:
+    - Reducing jitter in keypoint positions
+    - Predicting positions when temporarily occluded
+    - Tracking velocity for better predictions
+    - Filtering measurement noise
+    """
+    
+    def __init__(self, num_keypoints: int, process_noise: float = 0.01, measurement_noise: float = 0.1):
+        """
+        Initialize Kalman filter.
+        
+        Args:
+            num_keypoints: Number of keypoints to track
+            process_noise: Process noise covariance
+            measurement_noise: Measurement noise covariance
+        """
+        self.num_keypoints = num_keypoints
+        self.process_noise = process_noise
+        self.measurement_noise = measurement_noise
+        
+        # Initialize state for each keypoint: [x, y, vx, vy]
+        self.keypoint_states = [{'state': np.zeros(4), 'covariance': np.eye(4) * 100} 
+                                for _ in range(num_keypoints)]
+    
+    def update(self, keypoints: np.ndarray) -> np.ndarray:
+        """
+        Update Kalman filter with new measurements.
+        
+        Args:
+            keypoints: New keypoint measurements [num_keypoints, 3]
+            
+        Returns:
+            Filtered keypoints
+        """
+        if keypoints is None:
+            return None
+        
+        filtered = keypoints.copy()
+        
+        for i in range(self.num_keypoints):
+            if keypoints[i, 2] > 0.1:  # If keypoint is visible
+                # Measurement
+                z = keypoints[i, :2]  # x, y
+                
+                # Get current state
+                state = self.keypoint_states[i]['state']
+                cov = self.keypoint_states[i]['covariance']
+                
+                # Predict
+                # State transition: x' = x + vx, y' = y + vy, vx' = vx, vy' = vy
+                F = np.array([[1, 0, 1, 0],
+                             [0, 1, 0, 1],
+                             [0, 0, 1, 0],
+                             [0, 0, 0, 1]])
+                state_pred = F @ state
+                cov_pred = F @ cov @ F.T + np.eye(4) * self.process_noise
+                
+                # Update
+                # Measurement model: H = [1, 0, 0, 0; 0, 1, 0, 0]
+                H = np.array([[1, 0, 0, 0],
+                             [0, 1, 0, 0]])
+                y = z - H @ state_pred  # Innovation
+                S = H @ cov_pred @ H.T + np.eye(2) * self.measurement_noise  # Innovation covariance
+                K = cov_pred @ H.T @ np.linalg.inv(S)  # Kalman gain
+                
+                state = state_pred + K @ y
+                cov = (np.eye(4) - K @ H) @ cov_pred
+                
+                # Update state
+                self.keypoint_states[i]['state'] = state
+                self.keypoint_states[i]['covariance'] = cov
+                
+                # Use filtered position
+                filtered[i, :2] = state[:2]
+            else:
+                # Keypoint not visible - use prediction
+                state = self.keypoint_states[i]['state']
+                F = np.array([[1, 0, 1, 0],
+                             [0, 1, 0, 1],
+                             [0, 0, 1, 0],
+                             [0, 0, 0, 1]])
+                state_pred = F @ state
+                filtered[i, :2] = state_pred[:2]
+                filtered[i, 2] *= 0.9  # Reduce confidence for predicted points
+        
+        return filtered
 
 
 class MovementTracker:
@@ -343,6 +758,64 @@ class PoseHistoryTracker:
             return 0.0
         recent = self.confidence_history[-5:] if len(self.confidence_history) >= 5 else self.confidence_history
         return np.mean(recent)
+    
+    def compute_stability_metrics(self, window_size: int = 5) -> Dict[str, float]:
+        """
+        Compute frame-to-frame stability metrics (Stage 4 requirement).
+        
+        Calculates variance of joint coordinates across recent frames to assess
+        skeleton stability. Lower variance indicates more stable detection.
+        
+        Args:
+            window_size: Number of recent frames to analyze (default: 5)
+        
+        Returns:
+            Dictionary with stability metrics:
+            - 'mean_variance': Mean variance across all joints
+            - 'max_variance': Maximum variance (least stable joint)
+            - 'stability_score': Overall stability score (0-1, higher = more stable)
+        """
+        if len(self.keypoint_history) < 2:
+            return {
+                'mean_variance': 0.0,
+                'max_variance': 0.0,
+                'stability_score': 1.0
+            }
+        
+        # Get recent keypoint history
+        recent_keypoints = [kp for kp in self.keypoint_history[-window_size:] if kp is not None]
+        
+        if len(recent_keypoints) < 2:
+            return {
+                'mean_variance': 0.0,
+                'max_variance': 0.0,
+                'stability_score': 1.0
+            }
+        
+        # Stack keypoints: [num_frames, num_joints, 3]
+        stacked = np.stack(recent_keypoints)
+        
+        # Calculate variance for each joint across frames
+        # Variance shape: [num_joints, 2] (x and y variance)
+        variances = np.var(stacked[:, :, :2], axis=0)  # Only x, y coordinates
+        
+        # Mean variance across all joints
+        mean_variance = np.mean(variances)
+        
+        # Maximum variance (least stable joint)
+        max_variance = np.max(variances)
+        
+        # Stability score: inverse of variance (normalized)
+        # Lower variance = higher stability score
+        # Normalize to [0, 1] range (assuming variance < 1000 is reasonable)
+        stability_score = 1.0 / (1.0 + mean_variance / 100.0)
+        stability_score = np.clip(stability_score, 0.0, 1.0)
+        
+        return {
+            'mean_variance': float(mean_variance),
+            'max_variance': float(max_variance),
+            'stability_score': float(stability_score)
+        }
     
     def get_movement_info(self, joint_idx: int) -> Dict[str, any]:
         """Get movement information for a joint."""
@@ -982,6 +1455,21 @@ class IntegratedPoseSystem:
         self.pose_history_trackers = {}  # person_id -> PoseHistoryTracker
         self.person_id_counter = 0
         self.person_tracking = {}  # Track people across frames
+        
+        # Initialize accuracy improvement tools
+        self.keypoint_refiner = KeypointRefiner()
+        self.kalman_filters = {}  # person_id -> KalmanFilter
+        
+        # Initialize memory tracker for real-time inference
+        if MEMORY_TRACKING_AVAILABLE:
+            self.memory_tracker = MemoryTracker()
+            self.memory_tracking_enabled = True
+        else:
+            self.memory_tracker = None
+            self.memory_tracking_enabled = False
+        
+        self.frame_memory_samples = []  # Track memory over time
+        self.memory_sample_interval = 30  # Sample every 30 frames
     
     def predict_trained_model(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """
@@ -1269,6 +1757,45 @@ class IntegratedPoseSystem:
             print(f"Error in multi-person detection: {e}")
             return detected_people
     
+    def create_edge_overlay(self, frame: np.ndarray, 
+                           method: str = 'sobel',
+                           alpha: float = 0.3) -> np.ndarray:
+        """
+        Create edge overlay using Sobel or Laplacian operators.
+        
+        Stage 4 requirement: Overlay Sobel or Laplacian edges under skeletons
+        to highlight limb boundaries and assess joint alignment with image structures.
+        
+        Args:
+            frame: Input frame in BGR format
+            method: 'sobel' or 'laplacian' (default: 'sobel')
+            alpha: Transparency of edge overlay (0.0-1.0, default: 0.3)
+        
+        Returns:
+            Frame with edge overlay applied
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        if method == 'sobel':
+            # Sobel edge detection
+            sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+            sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+            edges = np.sqrt(sobel_x**2 + sobel_y**2)
+            edges = cv2.normalize(edges, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        else:  # laplacian
+            # Laplacian edge detection
+            laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+            edges = np.abs(laplacian)
+            edges = cv2.normalize(edges, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        
+        # Convert edges to BGR
+        edges_bgr = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        
+        # Blend with original frame
+        overlay = cv2.addWeighted(frame, 1.0 - alpha, edges_bgr, alpha, 0)
+        
+        return overlay
+    
     def visualize_pose(self,
                       frame: np.ndarray,
                       keypoints: np.ndarray,
@@ -1277,9 +1804,14 @@ class IntegratedPoseSystem:
                       skeleton_color: Tuple[int, int, int] = None,
                       keypoint_color: Tuple[int, int, int] = None,
                       show_pose_name: bool = True,
-                      keypoints_already_scaled: bool = False) -> np.ndarray:
+                      keypoints_already_scaled: bool = False,
+                      show_edge_overlay: bool = True,
+                      edge_method: str = 'sobel') -> np.ndarray:
         """
         Draw skeleton on frame with pose classification.
+        
+        Stage 4 enhancement: Overlays Sobel or Laplacian edges under skeletons
+        to highlight limb boundaries and assess joint alignment.
         
         Args:
             frame: Input frame
@@ -1290,11 +1822,17 @@ class IntegratedPoseSystem:
             keypoint_color: Color for keypoint circles (BGR) - default: pink (203, 192, 255)
             show_pose_name: Whether to display classified pose name
             keypoints_already_scaled: If True, keypoints are already in image coordinates
+            show_edge_overlay: Whether to overlay edges beneath skeleton (Stage 4 requirement)
+            edge_method: 'sobel' or 'laplacian' for edge detection (default: 'sobel')
         
         Returns:
             Frame with skeleton drawn and pose labeled
         """
         vis_frame = frame.copy()
+        
+        # Stage 4: Overlay edges beneath skeleton to highlight limb boundaries
+        if show_edge_overlay:
+            vis_frame = self.create_edge_overlay(vis_frame, method=edge_method, alpha=0.2)
         
         # Set default colors to match reference image (pink keypoints, teal skeleton)
         if skeleton_color is None:
@@ -1654,6 +2192,13 @@ class IntegratedPoseSystem:
         print("  - Keep your full body in frame")
         print("=" * 60)
         
+        # Start memory tracking for inference stage
+        initial_mem = 0.0
+        if self.memory_tracking_enabled:
+            self.memory_tracker.start_stage("Real-time Pose Inference")
+            initial_mem = get_memory_usage_mb()
+            print(f"Initial Memory: {initial_mem:.2f} MB")
+        
         show_trained = True  # For hybrid mode toggle
         frame_count = 0
         start_time = time.time()
@@ -1667,9 +2212,16 @@ class IntegratedPoseSystem:
             frame_count += 1
             inference_start = time.time()
             
+            # Stage 4 Preprocessing: Apply CLAHE + Gamma + Median (best variant)
+            # This preprocessing improves pose detection quality (82% Good rating)
+            if ENHANCEMENT_AVAILABLE:
+                processed_frame = apply_stage4_preprocessing(frame, mean_brightness=120.0)
+            else:
+                processed_frame = frame
+            
             # Multi-person detection
             if multi_person and self.mediapipe_model:
-                detected_people = self.predict_multiple_people(frame)
+                detected_people = self.predict_multiple_people(processed_frame)
                 vis_frame = frame.copy()
                 people_data = []
                 
@@ -1701,9 +2253,30 @@ class IntegratedPoseSystem:
                     if person_id not in self.pose_history_trackers:
                         self.pose_history_trackers[person_id] = PoseHistoryTracker(history_size=10, smoothing_alpha=0.7)
                     
-                    tracker = self.pose_history_trackers[person_id]
+                    # Get or create Kalman filter for this person
+                    if person_id not in self.kalman_filters:
+                        self.kalman_filters[person_id] = KalmanFilter(num_keypoints=len(keypoints))
                     
-                    # Smooth keypoints using temporal smoothing
+                    tracker = self.pose_history_trackers[person_id]
+                    kalman = self.kalman_filters[person_id]
+                    
+                    # Apply Stage 4 post-processing pipeline
+                    # Stage 1: Filter outliers (anatomical plausibility checks)
+                    keypoints = self.keypoint_refiner.filter_outliers(keypoints, len(keypoints))
+                    
+                    # Stage 2: Joint-confidence pruning (remove unstable detections)
+                    keypoints = self.keypoint_refiner.prune_low_confidence_joints(keypoints, confidence_threshold=0.3)
+                    
+                    # Stage 3: Interpolate missing keypoints
+                    keypoints = self.keypoint_refiner.interpolate_missing_keypoints(keypoints, len(keypoints))
+                    
+                    # Stage 4: Refine using anatomical constraints
+                    keypoints = self.keypoint_refiner.refine_keypoints(keypoints, len(keypoints))
+                    
+                    # Stage 5: Apply Kalman filtering for smooth tracking
+                    keypoints = kalman.update(keypoints)
+                    
+                    # Stage 6: Temporal smoothing
                     smoothed_keypoints = tracker.smooth_keypoints(keypoints)
                     if smoothed_keypoints is not None:
                         keypoints = smoothed_keypoints
@@ -1794,14 +2367,14 @@ class IntegratedPoseSystem:
                 
                 if self.hybrid_mode:
                     if show_trained and self.trained_model:
-                        trained_kpts = self.predict_trained_model(frame)
+                        trained_kpts = self.predict_trained_model(processed_frame)
                     if not show_trained and self.mediapipe_model:
-                        mediapipe_kpts = self.predict_mediapipe(frame)
+                        mediapipe_kpts = self.predict_mediapipe(processed_frame)
                 else:
                     if self.trained_model:
-                        trained_kpts = self.predict_trained_model(frame)
+                        trained_kpts = self.predict_trained_model(processed_frame)
                     elif self.mediapipe_model:
-                        mediapipe_kpts = self.predict_mediapipe(frame)
+                        mediapipe_kpts = self.predict_mediapipe(processed_frame)
                 
                 inference_time = time.time() - inference_start
                 self.inference_times.append(inference_time)
@@ -1821,8 +2394,17 @@ class IntegratedPoseSystem:
                 if trained_kpts is not None:
                     keypoints_to_use = trained_kpts
                     
-                    # Smooth keypoints
-                    smoothed_keypoints = tracker.smooth_keypoints(trained_kpts)
+                    # Initialize Kalman filter if needed
+                    if 0 not in self.kalman_filters:
+                        self.kalman_filters[0] = KalmanFilter(num_keypoints=len(keypoints_to_use))
+                    kalman = self.kalman_filters[0]
+                    
+                    # Apply 5-stage accuracy improvement pipeline
+                    keypoints_to_use = self.keypoint_refiner.filter_outliers(keypoints_to_use, len(keypoints_to_use))
+                    keypoints_to_use = self.keypoint_refiner.interpolate_missing_keypoints(keypoints_to_use, len(keypoints_to_use))
+                    keypoints_to_use = self.keypoint_refiner.refine_keypoints(keypoints_to_use, len(keypoints_to_use))
+                    keypoints_to_use = kalman.update(keypoints_to_use)
+                    smoothed_keypoints = tracker.smooth_keypoints(keypoints_to_use)
                     if smoothed_keypoints is not None:
                         keypoints_to_use = smoothed_keypoints
                     
@@ -1876,13 +2458,23 @@ class IntegratedPoseSystem:
                     vis_frame = self.visualize_pose(vis_frame, keypoints_to_use, "Trained", 
                                                    skeleton_color=(0, 255, 255),
                                                    keypoint_color=(203, 192, 255),
-                                                   show_pose_name=False, keypoints_already_scaled=False)
+                                                   show_pose_name=False, keypoints_already_scaled=False,
+                                                   show_edge_overlay=True, edge_method='sobel')
                     people_data.append((0, pose_name, keypoints_to_use, quality_feedback, body_details, movement_info))
                 elif mediapipe_kpts is not None:
                     keypoints_to_use = mediapipe_kpts
                     
-                    # Smooth keypoints
-                    smoothed_keypoints = tracker.smooth_keypoints(mediapipe_kpts)
+                    # Initialize Kalman filter if needed
+                    if 0 not in self.kalman_filters:
+                        self.kalman_filters[0] = KalmanFilter(num_keypoints=len(keypoints_to_use))
+                    kalman = self.kalman_filters[0]
+                    
+                    # Apply 5-stage accuracy improvement pipeline
+                    keypoints_to_use = self.keypoint_refiner.filter_outliers(keypoints_to_use, len(keypoints_to_use))
+                    keypoints_to_use = self.keypoint_refiner.interpolate_missing_keypoints(keypoints_to_use, len(keypoints_to_use))
+                    keypoints_to_use = self.keypoint_refiner.refine_keypoints(keypoints_to_use, len(keypoints_to_use))
+                    keypoints_to_use = kalman.update(keypoints_to_use)
+                    smoothed_keypoints = tracker.smooth_keypoints(keypoints_to_use)
                     if smoothed_keypoints is not None:
                         keypoints_to_use = smoothed_keypoints
                     
@@ -1936,7 +2528,8 @@ class IntegratedPoseSystem:
                     vis_frame = self.visualize_pose(vis_frame, keypoints_to_use, "MediaPipe", 
                                                    skeleton_color=(0, 255, 255),
                                                    keypoint_color=(203, 192, 255),
-                                                   show_pose_name=False, keypoints_already_scaled=True)
+                                                   show_pose_name=False, keypoints_already_scaled=True,
+                                                   show_edge_overlay=True, edge_method='sobel')
                     people_data.append((0, pose_name, keypoints_to_use, quality_feedback, body_details, movement_info))
                 
                 # Draw chatbot-style side panel for single person
@@ -1946,10 +2539,19 @@ class IntegratedPoseSystem:
             inference_time = time.time() - inference_start
             self.inference_times.append(inference_time)
             
-            # Add metrics
+            # Add metrics and memory sampling
             if frame_count % 30 == 0:
                 elapsed = time.time() - start_time
                 fps = frame_count / elapsed
+                
+                # Sample memory usage periodically
+                if self.memory_tracking_enabled and frame_count % self.memory_sample_interval == 0:
+                    mem_usage = get_memory_usage_mb()
+                    self.frame_memory_samples.append({
+                        'frame': frame_count,
+                        'memory_mb': mem_usage,
+                        'time': elapsed
+                    })
             
             # Display FPS and performance metrics
             cv2.putText(vis_frame, f'FPS: {fps:.1f}', (10, 30),
@@ -1980,6 +2582,12 @@ class IntegratedPoseSystem:
         cap.release()
         cv2.destroyAllWindows()
         
+        # End memory tracking
+        if self.memory_tracking_enabled:
+            self.memory_tracker.end_stage()
+            final_mem = get_memory_usage_mb()
+            optimize_memory()  # Clean up memory
+        
         # Print summary
         print("\n" + "=" * 60)
         print("SESSION SUMMARY")
@@ -1987,6 +2595,17 @@ class IntegratedPoseSystem:
         print(f"Total frames processed: {frame_count}")
         print(f"Average FPS: {frame_count / (time.time() - start_time):.1f}")
         print(f"Average inference time: {np.mean(self.inference_times)*1000:.1f}ms")
+        
+        # Print memory summary
+        if self.memory_tracking_enabled:
+            print(f"\nMemory Usage:")
+            print(f"  Initial: {initial_mem:.2f} MB")
+            print(f"  Final:   {final_mem:.2f} MB")
+            print(f"  Change:  {final_mem - initial_mem:+.2f} MB")
+            if self.frame_memory_samples:
+                peak_mem = max(s['memory_mb'] for s in self.frame_memory_samples)
+                print(f"  Peak:    {peak_mem:.2f} MB")
+        
         print("=" * 60)
 
 
